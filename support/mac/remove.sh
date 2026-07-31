@@ -31,6 +31,16 @@ trap cleanup EXIT HUP INT TERM
 /usr/bin/osacompile -o "$STAGING_APP" "$SOURCE_SCRIPT"
 /bin/cp "$SOURCE_ICON" "$STAGING_APP/Contents/Resources/Trash.icns"
 
+APPLET_EXECUTABLE="$STAGING_APP/Contents/MacOS/applet"
+ARM_APPLET="$STAGING_ROOT/applet-arm64"
+if ! /usr/bin/lipo "$APPLET_EXECUTABLE" -verify_arch arm64 >/dev/null 2>&1; then
+  print -u2 -- "Uninstall does not contain an Apple silicon arm64 executable."
+  exit 1
+fi
+/usr/bin/lipo "$APPLET_EXECUTABLE" -thin arm64 -output "$ARM_APPLET"
+/bin/chmod 755 "$ARM_APPLET"
+/bin/mv "$ARM_APPLET" "$APPLET_EXECUTABLE"
+
 set_plist_string() {
   local key="$1"
   local value="$2"
@@ -44,6 +54,12 @@ set_plist_string CFBundleIdentifier "io.github.mitchell-mos.control-module.unins
 set_plist_string CFBundleIconFile "Trash"
 /usr/libexec/PlistBuddy -c "Delete :CFBundleIconName" "$STAGING_APP/Contents/Info.plist" 2>/dev/null || true
 /usr/libexec/PlistBuddy -c "Delete :LSMinimumSystemVersionByArchitecture" "$STAGING_APP/Contents/Info.plist" 2>/dev/null || true
+/usr/libexec/PlistBuddy -c "Delete :LSRequiresCarbon" "$STAGING_APP/Contents/Info.plist" 2>/dev/null || true
+/usr/libexec/PlistBuddy -c "Delete :LSArchitecturePriority" "$STAGING_APP/Contents/Info.plist" 2>/dev/null || true
+/usr/libexec/PlistBuddy -c "Add :LSArchitecturePriority array" "$STAGING_APP/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Add :LSArchitecturePriority:0 string arm64" "$STAGING_APP/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Add :LSRequiresNativeExecution bool true" "$STAGING_APP/Contents/Info.plist" 2>/dev/null \
+  || /usr/libexec/PlistBuddy -c "Set :LSRequiresNativeExecution true" "$STAGING_APP/Contents/Info.plist"
 for privacy_key in \
   NSAppleEventsUsageDescription \
   NSAppleMusicUsageDescription \
@@ -60,17 +76,18 @@ for privacy_key in \
 done
 /usr/libexec/PlistBuddy -c "Add :LSMinimumSystemVersion string 13.0" "$STAGING_APP/Contents/Info.plist" 2>/dev/null \
   || /usr/libexec/PlistBuddy -c "Set :LSMinimumSystemVersion 13.0" "$STAGING_APP/Contents/Info.plist"
-/usr/libexec/PlistBuddy -c "Add :NSDesktopFolderUsageDescription string Uninstall needs access to the Control Module source folder selected by the user." "$STAGING_APP/Contents/Info.plist" 2>/dev/null \
-  || /usr/libexec/PlistBuddy -c "Set :NSDesktopFolderUsageDescription Uninstall needs access to the Control Module source folder selected by the user." "$STAGING_APP/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Add :NSDesktopFolderUsageDescription string Uninstall moves only the verified Control Module folder containing this app to Trash." "$STAGING_APP/Contents/Info.plist" 2>/dev/null \
+  || /usr/libexec/PlistBuddy -c "Set :NSDesktopFolderUsageDescription Uninstall moves only the verified Control Module folder containing this app to Trash." "$STAGING_APP/Contents/Info.plist"
+
+/usr/bin/touch "$STAGING_APP"
+/usr/bin/xattr -cr "$STAGING_APP"
+/usr/bin/xattr -d com.apple.FinderInfo "$STAGING_APP" 2>/dev/null || true
+/usr/bin/codesign --force --deep --sign - "$STAGING_APP" >/dev/null
+/usr/bin/codesign --verify --deep "$STAGING_APP"
 
 if [[ -e "$OUTPUT_APP" ]]; then
   /bin/mv "$OUTPUT_APP" "$STAGING_ROOT/previous-Uninstall.app"
 fi
 /bin/mv "$STAGING_APP" "$OUTPUT_APP"
-/usr/bin/touch "$OUTPUT_APP"
-/usr/bin/xattr -cr "$OUTPUT_APP"
-/usr/bin/codesign --force --deep --sign - "$OUTPUT_APP" >/dev/null
-/bin/sleep 0.5
-/usr/bin/xattr -d com.apple.FinderInfo "$OUTPUT_APP" 2>/dev/null || true
 /usr/bin/codesign --verify --deep "$OUTPUT_APP"
 print -- "$OUTPUT_APP"

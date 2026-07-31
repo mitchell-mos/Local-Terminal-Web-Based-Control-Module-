@@ -1,8 +1,13 @@
 import assert from "node:assert/strict";
-import { access, readFile, readdir } from "node:fs/promises";
+import { access, chmod, cp, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { promisify } from "node:util";
 import test from "node:test";
 
 const root = new URL("../../", import.meta.url);
+const execFileAsync = promisify(execFile);
 
 async function read(path) {
   return readFile(new URL(path, root), "utf8");
@@ -95,12 +100,55 @@ test("keeps local documentation links routed to existing files", async () => {
   }
 });
 
+test("uninstall removes only its verified source folder", { skip: process.platform !== "darwin" }, async () => {
+  const temporaryRoot = await mkdtemp(join(tmpdir(), "control-module-uninstall-test-"));
+  const fakeHome = join(temporaryRoot, "home");
+  const source = join(temporaryRoot, "download", "Control Module Test Copy");
+  const otherCopy = join(temporaryRoot, "download", "Other Control Module Copy");
+  const application = join(fakeHome, "Applications", "Control Module.app");
+  const shortcut = join(fakeHome, "Desktop", "Control Module.app");
+  const settings = join(fakeHome, "Library", "Application Support", "Control Module", "data", "projects.json");
+  const uninstallScript = join(source, "support", "mac", "uninstall.sh");
+
+  try {
+    await mkdir(join(source, "support", "mac"), { recursive: true });
+    await mkdir(join(source, "server"), { recursive: true });
+    await mkdir(otherCopy, { recursive: true });
+    await mkdir(application, { recursive: true });
+    await mkdir(shortcut, { recursive: true });
+    await mkdir(join(settings, ".."), { recursive: true });
+    await writeFile(join(source, "package.json"), '{"name":"control-module"}\n');
+    await writeFile(join(source, "ControlModule"), "#!/bin/zsh\n");
+    await writeFile(join(source, "server", "control_server.py"), "# test fixture\n");
+    await chmod(join(source, "ControlModule"), 0o755);
+    await cp(new URL("support/mac/uninstall.sh", root), uninstallScript);
+    await chmod(uninstallScript, 0o755);
+    await writeFile(join(otherCopy, "keep.txt"), "keep\n");
+    await writeFile(join(application, "keep.txt"), "keep\n");
+    await writeFile(join(shortcut, "keep.txt"), "keep\n");
+    await writeFile(settings, "[]\n");
+
+    await execFileAsync("/bin/zsh", [uninstallScript, "--source", source, "--remove-source"], {
+      env: { ...process.env, HOME: fakeHome },
+    });
+
+    await assert.rejects(access(source));
+    await assert.doesNotReject(access(join(fakeHome, ".Trash", "Control Module Test Copy", "package.json")));
+    await assert.doesNotReject(access(join(otherCopy, "keep.txt")));
+    await assert.doesNotReject(access(join(application, "keep.txt")));
+    await assert.doesNotReject(access(join(shortcut, "keep.txt")));
+    await assert.doesNotReject(access(settings));
+  } finally {
+    await rm(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
 test("ships relocatable native setup and uninstall apps", async () => {
-  const [launcher, installer, uninstaller, browserCleanup, builder, setupBuilder, setupSource, setupStore, removeBuilder, uninstallSource, iconBuilder, trashIcon, plist, readme] = await Promise.all([
+  const [launcher, nativeLauncher, installer, uninstaller, builder, setupBuilder, setupSource, setupStore, removeBuilder, uninstallSource, iconBuilder, trashIcon, plist, readme] = await Promise.all([
     read("ControlModule"),
+    read("support/mac/Launch.applescript"),
     read("support/mac/install.sh"),
     read("support/mac/uninstall.sh"),
-    read("support/mac/clear.py"),
     read("support/mac/app.sh"),
     read("support/mac/setup.sh"),
     read("support/mac/Setup.applescript"),
@@ -117,47 +165,84 @@ test("ships relocatable native setup and uninstall apps", async () => {
   assert.match(launcher, /server\/control_server\.py/);
   assert.match(launcher, /Resources\/control-module/);
   assert.match(launcher, /CONTROL_MODULE_WEB_PORT/);
+  assert.match(launcher, /uname -m/);
+  assert.match(launcher, /Rosetta translation are not supported/);
   assert.doesNotMatch(launcher, /Desktop\/control module/);
+  assert.match(nativeLauncher, /Contents\/Resources\/ControlModule/);
+  assert.match(nativeLauncher, /\/bin\/zsh/);
   assert.match(installer, /project-path/);
   assert.match(installer, /install-path/);
   assert.match(installer, /--web-port/);
   assert.match(installer, /web-port/);
   assert.match(installer, /chmod 600/);
-  assert.match(uninstaller, /api\/projects\/stop-all/);
+  assert.match(installer, /nodejs\.org\/download\/release/);
+  assert.match(installer, /NODE_SHA256/);
+  assert.match(installer, /shasum -a 256/);
+  assert.match(installer, /runtime_is_valid/);
   assert.match(uninstaller, /--dry-run/);
   assert.match(uninstaller, /--stop-only/);
-  assert.match(uninstaller, /clear_browser_data/);
-  assert.match(browserCleanup, /Clear-Site-Data/);
-  assert.match(browserCleanup, /localStorage\.clear/);
-  assert.match(uninstaller, /is_control_module_app/);
-  assert.match(uninstaller, /is_control_module_tool/);
-  assert.match(uninstaller, /Desktop\/Setup\.app/);
+  assert.match(uninstaller, /Other Control Module folders, apps, shortcuts, browser data, and settings: keep/);
+  assert.match(uninstaller, /process_uses_source/);
+  assert.doesNotMatch(uninstaller, /clear_browser_data/);
+  assert.doesNotMatch(uninstaller, /APP_TARGETS|TOOL_TARGETS/);
+  assert.doesNotMatch(uninstaller, /rm -rf/);
   assert.match(uninstaller, /\.Trash/);
-  assert.match(uninstaller, /Refusing to remove/);
+  assert.match(uninstaller, /Refusing to operate/);
   assert.match(builder, /ControlModule\.icns/);
-  assert.match(builder, /codesign --force --deep --sign - "\$OUTPUT_APP"/);
+  assert.match(builder, /Launch\.applescript/);
+  assert.match(builder, /lipo.*-thin arm64/);
+  assert.match(builder, /ditto "\$RUNTIME_DIR"/);
+  assert.match(builder, /codesign --force --deep --sign - "\$STAGING_APP"/);
   assert.match(setupBuilder, /osacompile/);
   assert.match(setupBuilder, /Setup\.app/);
+  assert.match(setupBuilder, /lipo.*-thin arm64/);
+  assert.match(setupBuilder, /LSRequiresNativeExecution/);
   assert.match(setupSource, /Dashboard port/);
   assert.match(setupSource, /--web-port/);
   assert.match(setupSource, /support\/mac\/store\.sh/);
-  assert.match(setupSource, /move into the support folder/);
+  assert.match(setupSource, /Control Module folder/);
+  assert.doesNotMatch(setupSource, /installLocation is "Desktop"/);
+  assert.match(setupSource, /Desktop shortcut/);
+  assert.doesNotMatch(setupSource, /Control Module and Setup shortcuts/);
+  assert.match(setupSource, /stay in the Control Module folder/);
   assert.match(setupSource, /no AI service, account, analytics, or cloud connection/i);
-  assert.match(setupStore, /support\/Setup\.app/);
+  assert.doesNotMatch(setupSource, /choose folder/i);
+  assert.match(setupSource, /parentFolder/);
+  assert.match(setupSource, /\/bin\/test/);
+  assert.doesNotMatch(setupSource, /\/usr\/bin\/test/);
+  assert.match(setupStore, /SOURCE_DIR\/Setup\.app/);
+  assert.match(setupStore, /Desktop\/Setup\.app/);
+  assert.doesNotMatch(setupStore, /ln -s/);
   assert.match(setupStore, /io\.github\.mitchell-mos\.control-module\.setup/);
   assert.match(setupStore, /bundle_is_setup/);
   assert.match(removeBuilder, /Uninstall\.app/);
   assert.match(removeBuilder, /Trash\.icns/);
-  assert.match(uninstallSource, /Type UNINSTALL/);
+  assert.match(removeBuilder, /lipo.*-thin arm64/);
+  assert.match(removeBuilder, /LSRequiresNativeExecution/);
+  assert.match(uninstallSource, /No, I don’t want to/);
+  assert.match(uninstallSource, /Yes, I’d like to/);
+  assert.match(uninstallSource, /--remove-source/);
+  assert.doesNotMatch(uninstallSource, /Type UNINSTALL/);
+  assert.doesNotMatch(uninstallSource, /choose from list/);
+  assert.match(uninstallSource, /on run[\s\S]*set confirmDialog[\s\S]*set sourceFolder/);
   assert.match(uninstallSource, /support\/mac\/uninstall\.sh/);
+  assert.doesNotMatch(uninstallSource, /choose folder/i);
+  assert.doesNotMatch(uninstallSource, /savedSourceFolder/);
+  assert.match(uninstallSource, /Only the folder containing this Uninstall app is moved to Trash/);
+  assert.match(uninstallSource, /parentFolder/);
+  assert.match(uninstallSource, /\/bin\/test/);
+  assert.doesNotMatch(uninstallSource, /\/usr\/bin\/test/);
   assert.match(trashIcon, /<svg/);
   assert.match(trashIcon, /#c73535/);
   assert.match(iconBuilder, /public\/gear\.svg/);
   assert.match(plist, /CFBundleIconFile/);
   assert.match(plist, /NSDesktopFolderUsageDescription/);
+  assert.match(plist, /LSRequiresNativeExecution/);
+  assert.match(plist, /arm64/);
   assert.doesNotMatch(plist, /codex/i);
   assert.match(readme, /Desktop shortcut/);
   assert.match(readme, /Setup\.app/);
   assert.match(readme, /Uninstall\.app/);
   assert.match(readme, /signed and notarized/i);
+  assert.match(readme, /directly from nodejs\.org/i);
 });

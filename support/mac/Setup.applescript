@@ -4,7 +4,10 @@ property defaultDashboardPort : "1025"
 
 on sourceIsValid(sourcePath)
   try
-    do shell script "/usr/bin/test -f " & quoted form of (sourcePath & "/package.json") & " -a -x " & quoted form of (sourcePath & "/support/mac/install.sh") & " -a -x " & quoted form of (sourcePath & "/support/mac/store.sh")
+    set packagePath to quoted form of (sourcePath & "/package.json")
+    set installPath to quoted form of (sourcePath & "/support/mac/install.sh")
+    set storePath to quoted form of (sourcePath & "/support/mac/store.sh")
+    do shell script "/bin/test -f " & packagePath & " && /bin/test -x " & installPath & " && /bin/test -x " & storePath
     return true
   on error
     return false
@@ -16,12 +19,16 @@ on locateSourceFolder()
   set nearbyFolder to do shell script "/usr/bin/dirname " & quoted form of setupPath
   if my sourceIsValid(nearbyFolder) then return nearbyFolder
 
-  repeat
-    set selectedFolder to choose folder with prompt "Choose the downloaded Control Module source folder."
-    set selectedPath to POSIX path of selectedFolder
-    if my sourceIsValid(selectedPath) then return selectedPath
-    display alert "That folder is not a complete Control Module download." message "Choose the folder containing package.json and the support folder." as warning
-  end repeat
+  set parentFolder to do shell script "/usr/bin/dirname " & quoted form of nearbyFolder
+  if my sourceIsValid(parentFolder) then return parentFolder
+
+  set settingsPath to (POSIX path of (path to home folder)) & "Library/Application Support/Control Module/project-path"
+  try
+    set savedPath to do shell script "/bin/cat " & quoted form of settingsPath
+    if my sourceIsValid(savedPath) then return savedPath
+  end try
+
+  error "Setup could not verify its Control Module source folder. Keep Setup.app in the downloaded Control Module folder. No other folder was accessed."
 end locateSourceFolder
 
 on savedDashboardPort()
@@ -54,7 +61,7 @@ on chooseDashboardPort()
 end chooseDashboardPort
 
 on chooseInstallLocation()
-  set locationChoices to {"Applications — recommended", "Desktop"}
+  set locationChoices to {"Control Module folder — recommended", "Personal Applications"}
   set selectedLocation to choose from list locationChoices with title "Install location — 2 of 4" with prompt "Where should the Control Module app be installed?" default items {item 1 of locationChoices} OK button name "Continue" cancel button name "Cancel"
   if selectedLocation is false then error number -128
   return item 1 of selectedLocation
@@ -71,13 +78,14 @@ on run
     set homePath to POSIX path of (path to home folder)
     set createShortcut to false
 
-    if installLocation is "Desktop" then
-      set destinationApp to homePath & "Desktop/Control Module.app"
+    if installLocation is "Control Module folder — recommended" then
+      set destinationApp to sourceFolder & "/Control Module.app"
     else
       set destinationApp to homePath & "Applications/Control Module.app"
-      set shortcutDialog to display dialog "Add a Control Module shortcut to the Desktop?" with title "Desktop shortcut — 3 of 4" buttons {"No shortcut", "Add shortcut"} default button "Add shortcut" with icon note
-      set createShortcut to button returned of shortcutDialog is "Add shortcut"
     end if
+
+    set shortcutDialog to display dialog "Add a Control Module shortcut to the Desktop? The real app stays in its installation folder." with title "Desktop shortcut — 3 of 4" buttons {"No shortcut", "Add shortcut"} default button "Add shortcut" with icon note
+    set createShortcut to button returned of shortcutDialog is "Add shortcut"
 
     set launchDialog to display dialog "Open Control Module when setup finishes?" with title "Finish behavior — 4 of 4" buttons {"Install only", "Install and open"} default button "Install and open" with icon note
     set launchAfterInstall to button returned of launchDialog is "Install and open"
@@ -97,14 +105,14 @@ on run
     if launchAfterInstall then set installCommand to installCommand & " --launch"
 
     do shell script installCommand
-    display dialog "Control Module is ready at http://127.0.0.1:" & dashboardPort & ".\n\nWhen you select Done, Setup will move into the support folder." with title "Setup complete" buttons {"Done"} default button "Done" with icon note
+    display dialog "Control Module is ready at http://127.0.0.1:" & dashboardPort & ".\n\nSetup will stay in the Control Module folder." with title "Setup complete" buttons {"Done"} default button "Done" with icon note
 
     set storeScript to sourceFolder & "/support/mac/store.sh"
     set currentSetup to POSIX path of (path to me)
     try
       do shell script quoted form of storeScript & " " & quoted form of sourceFolder & " " & quoted form of currentSetup
     on error storeMessage
-      display alert "Control Module is installed, but Setup stayed where it is" message (storeMessage & " You can move Setup.app into the support folder manually.") as warning
+      display alert "Control Module is installed, but Setup could not be organized" message storeMessage as warning
     end try
   on error errorMessage number errorNumber
     if errorNumber is -128 then return

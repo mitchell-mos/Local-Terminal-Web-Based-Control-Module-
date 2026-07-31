@@ -10,8 +10,8 @@ fi
 
 SOURCE_DIR="${1:A}"
 CURRENT_APP="${2:A}"
-TARGET_APP="$SOURCE_DIR/support/Setup.app"
-ROOT_APP="$SOURCE_DIR/Setup.app"
+TARGET_APP="$SOURCE_DIR/Setup.app"
+DESKTOP_APP="$HOME/Desktop/Setup.app"
 SETUP_ID="io.github.mitchell-mos.control-module.setup"
 
 bundle_is_setup() {
@@ -23,30 +23,24 @@ bundle_is_setup() {
 }
 
 if [[ ! -f "$SOURCE_DIR/package.json" || ! -x "$SOURCE_DIR/support/mac/install.sh" ]]; then
-  print -u2 -- "The selected source folder is not a complete Control Module download."
+  print -u2 -- "The source folder is not a verified Control Module download."
   exit 1
 fi
 if [[ "${CURRENT_APP:t}" != "Setup.app" ]] || ! bundle_is_setup "$CURRENT_APP"; then
   print -u2 -- "The running Setup app could not be verified, so it was left where it is."
   exit 1
 fi
-if [[ "$ROOT_APP" != "$CURRENT_APP" && "$ROOT_APP" != "$TARGET_APP" && -e "$ROOT_APP" ]] \
-  && ! bundle_is_setup "$ROOT_APP"; then
-  print -u2 -- "The root Setup.app was not recognized, so nothing was moved."
-  exit 1
-fi
+STAGING_DIR="$(/usr/bin/mktemp -d "$SOURCE_DIR/support/.setup-store.XXXXXX")"
+PREVIOUS_APP="$STAGING_DIR/Setup.app"
+cleanup() {
+  /bin/rm -rf "$STAGING_DIR"
+}
+trap cleanup EXIT HUP INT TERM
 
 if [[ "$CURRENT_APP" != "$TARGET_APP" ]]; then
-  STAGING_DIR="$(/usr/bin/mktemp -d "$SOURCE_DIR/support/.setup-store.XXXXXX")"
-  PREVIOUS_APP="$STAGING_DIR/Setup.app"
-  cleanup() {
-    /bin/rm -rf "$STAGING_DIR"
-  }
-  trap cleanup EXIT HUP INT TERM
-
   if [[ -e "$TARGET_APP" ]]; then
     if ! bundle_is_setup "$TARGET_APP"; then
-      print -u2 -- "support/Setup.app is not a verified Control Module Setup app, so nothing was moved."
+      print -u2 -- "The project Setup.app is not a verified Control Module Setup app, so nothing was moved."
       exit 1
     fi
     /bin/mv "$TARGET_APP" "$PREVIOUS_APP"
@@ -54,13 +48,19 @@ if [[ "$CURRENT_APP" != "$TARGET_APP" ]]; then
 
   if ! /bin/mv "$CURRENT_APP" "$TARGET_APP"; then
     [[ -e "$PREVIOUS_APP" ]] && /bin/mv "$PREVIOUS_APP" "$TARGET_APP"
-    print -u2 -- "Setup could not be moved into the support folder."
+    print -u2 -- "Setup could not be moved into the Control Module folder."
     exit 1
   fi
 fi
 
-if [[ "$ROOT_APP" != "$TARGET_APP" && "$ROOT_APP" != "$CURRENT_APP" && -e "$ROOT_APP" ]]; then
-  /bin/rm -rf "$ROOT_APP"
+if [[ -L "$DESKTOP_APP" ]]; then
+  /bin/rm "$DESKTOP_APP"
+elif [[ -e "$DESKTOP_APP" && "$DESKTOP_APP" != "$CURRENT_APP" ]]; then
+  if ! bundle_is_setup "$DESKTOP_APP"; then
+    print -u2 -- "A Desktop item named Setup.app is not a verified Control Module Setup app, so it was left unchanged."
+    exit 1
+  fi
+  /bin/mv "$DESKTOP_APP" "$STAGING_DIR/Desktop-Setup.app"
 fi
 
 print -- "$TARGET_APP"

@@ -2,59 +2,39 @@ use scripting additions
 
 on sourceIsValid(sourcePath)
   try
-    do shell script "/usr/bin/test -f " & quoted form of (sourcePath & "/package.json") & " -a -x " & quoted form of (sourcePath & "/support/mac/uninstall.sh")
+    set packagePath to quoted form of (sourcePath & "/package.json")
+    set launcherPath to quoted form of (sourcePath & "/ControlModule")
+    set serverPath to quoted form of (sourcePath & "/server/control_server.py")
+    set uninstallPath to quoted form of (sourcePath & "/support/mac/uninstall.sh")
+    do shell script "/bin/test -f " & packagePath & " && /bin/test -x " & launcherPath & " && /bin/test -f " & serverPath & " && /bin/test -x " & uninstallPath
     return true
   on error
     return false
   end try
 end sourceIsValid
 
-on savedSourceFolder()
-  set settingsPath to (POSIX path of (path to home folder)) & "Library/Application Support/Control Module/project-path"
-  try
-    set savedPath to do shell script "/bin/cat " & quoted form of settingsPath
-    if my sourceIsValid(savedPath) then return savedPath
-  end try
-  return ""
-end savedSourceFolder
-
 on locateSourceFolder()
   set appPath to POSIX path of (path to me)
   set nearbyFolder to do shell script "/usr/bin/dirname " & quoted form of appPath
   if my sourceIsValid(nearbyFolder) then return nearbyFolder
 
-  set savedFolder to my savedSourceFolder()
-  if savedFolder is not "" then return savedFolder
+  set parentFolder to do shell script "/usr/bin/dirname " & quoted form of nearbyFolder
+  if my sourceIsValid(parentFolder) then return parentFolder
 
-  repeat
-    set selectedFolder to choose folder with prompt "Choose the Control Module folder."
-    set selectedPath to POSIX path of selectedFolder
-    if my sourceIsValid(selectedPath) then return selectedPath
-    display alert "That is not the Control Module folder." message "Choose the folder containing package.json and support." as warning
-  end repeat
+  error "Uninstall could not verify the folder containing this copy of Control Module. Keep Uninstall.app inside that downloaded folder. No other folder was accessed."
 end locateSourceFolder
 
 on run
   try
+    set confirmDialog to display dialog "Are you sure you want to delete this copy of Control Module?\n\nOnly the folder containing this Uninstall app is moved to Trash. Other copies, apps, shortcuts, settings, browser data, external projects, and databases stay unchanged." with title "Delete this copy?" buttons {"No, I don’t want to", "Yes, I’d like to"} default button "No, I don’t want to" cancel button "No, I don’t want to" with icon caution
+    if button returned of confirmDialog is not "Yes, I’d like to" then return
+
     set sourceFolder to my locateSourceFolder()
-    display dialog "Control Module and every project it manages will stop. Installed apps, shortcuts, settings, commands, logs, tokens, and backups will be deleted.\n\nExternal project folders and databases will not be changed." with title "Uninstall Control Module?" buttons {"Cancel", "Continue"} default button "Continue" cancel button "Cancel" with icon caution
-
-    set confirmDialog to display dialog "Type UNINSTALL to confirm permanent removal of private data." with title "Confirm uninstall" default answer "" buttons {"Cancel", "Uninstall"} default button "Uninstall" cancel button "Cancel" with icon caution
-    if text returned of confirmDialog is not "UNINSTALL" then
-      display alert "Nothing was removed." message "The confirmation did not match UNINSTALL." as warning
-      return
-    end if
-
-    set sourceChoices to {"Keep source", "Move source to Trash"}
-    set sourceChoice to choose from list sourceChoices with title "Source code" with prompt "Keep the downloaded source folder?" default items {item 1 of sourceChoices} OK button name "Continue" cancel button name "Cancel"
-    if sourceChoice is false then error number -128
-
     set uninstallScript to sourceFolder & "/support/mac/uninstall.sh"
-    set uninstallCommand to quoted form of uninstallScript & " --source " & quoted form of sourceFolder
-    if item 1 of sourceChoice is "Move source to Trash" then set uninstallCommand to uninstallCommand & " --remove-source"
+    set uninstallCommand to quoted form of uninstallScript & " --source " & quoted form of sourceFolder & " --remove-source"
 
     set uninstallOutput to do shell script uninstallCommand
-    display dialog uninstallOutput & "\n\nIf the source was moved to Trash, empty the Trash when you want to erase it permanently." with title "Uninstall complete" buttons {"Done"} default button "Done" with icon note
+    display notification "This Control Module folder was moved to Trash. Other copies were not changed." with title "Uninstall complete"
   on error errorMessage number errorNumber
     if errorNumber is -128 then return
     display alert "Control Module could not be uninstalled" message errorMessage as critical

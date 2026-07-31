@@ -44,7 +44,7 @@ SERVER_FILE="$PROJECT_DIR/server/control_server.py"
 WEB_PID=""
 RUNNER_PID=""
 BUNDLED_NODE="$SELF_DIR/../Resources/runtime/bin/node"
-BASE_PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+BASE_PATH="/opt/homebrew/bin:/usr/local/bin:/Library/Frameworks/Python.framework/Versions/Current/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
 if [[ -x "$BUNDLED_NODE" ]]; then
   NODE="$BUNDLED_NODE"
@@ -62,6 +62,11 @@ show_error() {
     print -u2 -- "Control Module could not start: $1"
   fi
 }
+
+if [[ "$(/usr/bin/uname -m)" != "arm64" ]]; then
+  show_error "Control Module requires an Apple silicon Mac. Intel Macs and Rosetta translation are not supported."
+  exit 1
+fi
 
 confirm_setup() {
   if [[ "$(uname -s)" != "Darwin" ]]; then
@@ -163,17 +168,42 @@ if [[ ! -f "$SERVER_FILE" ]]; then
 fi
 
 if ! prepare_private_data; then
-  show_error "Existing private data could not be moved safely. Check access to the selected source folder, then rerun setup. Nothing was overwritten."
+  show_error "Existing private data could not be moved safely. Check access to the verified Control Module folder, then rerun setup. Nothing was overwritten."
   exit 1
 fi
 export CONTROL_MODULE_DATA_DIR="$USER_DATA_DIR"
 export CONTROL_MODULE_WEB_PORT="$WEB_PORT"
 
+find_supported_python() {
+  local candidate
+  typeset -a candidates
+  candidates=(
+    "${CONTROL_MODULE_PYTHON:-}"
+    "$(command -v python3 || true)"
+    "/Library/Frameworks/Python.framework/Versions/Current/bin/python3"
+    "/opt/homebrew/bin/python3"
+    "/usr/local/bin/python3"
+    "/usr/bin/python3"
+  )
+  for candidate in "${candidates[@]}"; do
+    if [[ -x "$candidate" ]] \
+      && "$candidate" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)' >/dev/null 2>&1; then
+      print -r -- "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
 PNPM="$(command -v pnpm || true)"
 COREPACK="$(command -v corepack || true)"
-PYTHON="$(command -v python3 || true)"
-if [[ -z "$NODE" || -z "$PYTHON" ]]; then
-  show_error "Install Node.js 22 or newer and Python 3, then reopen Control Module. No Codex, ChatGPT, or LLM is required."
+PYTHON="$(find_supported_python || true)"
+if [[ -z "$NODE" ]]; then
+  show_error "The bundled Node.js runtime is missing. Run Setup again while connected to the internet. No Codex, ChatGPT, or LLM is required."
+  exit 1
+fi
+if [[ -z "$PYTHON" ]]; then
+  show_error "Install Python 3.11 or newer, then reopen Control Module. No Codex, ChatGPT, or LLM is required."
   exit 1
 fi
 

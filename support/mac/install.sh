@@ -10,6 +10,13 @@ DESTINATION_APP="$HOME/Applications/Control Module.app"
 CREATE_DESKTOP_SHORTCUT=0
 LAUNCH_APP=0
 WEB_PORT=1025
+NODE_VERSION="24.17.0"
+NODE_ARCHIVE="node-v${NODE_VERSION}-darwin-arm64.tar.xz"
+NODE_SHA256="cf7e9152d7bd86c140f6eccf3577abfbaf8960be1ca49d9d900e8484984dcb9a"
+NODE_URL="https://nodejs.org/download/release/v${NODE_VERSION}/${NODE_ARCHIVE}"
+CONFIG_DIR="${CONTROL_MODULE_CONFIG_DIR:-$HOME/Library/Application Support/Control Module}"
+RUNTIME_CACHE="$CONFIG_DIR/runtime/node-v${NODE_VERSION}-darwin-arm64"
+RUNTIME_DOWNLOAD_DIR=""
 
 usage() {
   print -- "Usage: $0 [--source DIR] [--destination APP] [--web-port PORT] [--desktop-shortcut] [--launch]"
@@ -52,11 +59,16 @@ while (( $# > 0 )); do
   esac
 done
 
+if [[ "$(/usr/bin/uname -m)" != "arm64" ]]; then
+  print -u2 -- "Control Module requires an Apple silicon Mac. Intel Macs and Rosetta translation are not supported."
+  exit 1
+fi
+
 SOURCE_DIR="${SOURCE_DIR:A}"
 DESTINATION_APP="${DESTINATION_APP:A}"
 
 if [[ ! -f "$SOURCE_DIR/package.json" || ! -x "$SOURCE_DIR/ControlModule" || ! -f "$SOURCE_DIR/server/control_server.py" ]]; then
-  print -u2 -- "The selected source folder is not a Control Module checkout."
+  print -u2 -- "The source folder is not a verified Control Module checkout."
   exit 1
 fi
 
@@ -65,7 +77,6 @@ if [[ "$WEB_PORT" != <-> ]] || (( WEB_PORT < 1025 || WEB_PORT > 65535 || WEB_POR
   exit 1
 fi
 
-CONFIG_DIR="${CONTROL_MODULE_CONFIG_DIR:-$HOME/Library/Application Support/Control Module}"
 CURRENT_WEB_PORT=1025
 if [[ -r "$CONFIG_DIR/web-port" ]]; then
   IFS= read -r CURRENT_WEB_PORT < "$CONFIG_DIR/web-port" || true
@@ -95,7 +106,65 @@ if (( CREATE_DESKTOP_SHORTCUT )); then
   fi
 fi
 
-"$SCRIPT_DIR/app.sh" --source "$SOURCE_DIR" --output "$DESTINATION_APP" >/dev/null
+runtime_is_valid() {
+  local runtime_dir="$1"
+  [[ -x "$runtime_dir/bin/node" && -x "$runtime_dir/bin/corepack" && -f "$runtime_dir/LICENSE" ]] || return 1
+  [[ "$(/usr/bin/lipo -archs "$runtime_dir/bin/node" 2>/dev/null || true)" == "arm64" ]] || return 1
+  [[ "$("$runtime_dir/bin/node" --version 2>/dev/null || true)" == "v$NODE_VERSION" ]]
+}
+
+cleanup_runtime_download() {
+  if [[ -n "$RUNTIME_DOWNLOAD_DIR" && -d "$RUNTIME_DOWNLOAD_DIR" ]]; then
+    /bin/rm -rf "$RUNTIME_DOWNLOAD_DIR"
+  fi
+}
+trap cleanup_runtime_download EXIT HUP INT TERM
+
+ensure_runtime() {
+  local archive_path extracted_runtime previous_runtime actual_checksum
+
+  if runtime_is_valid "$RUNTIME_CACHE"; then
+    return 0
+  fi
+
+  /bin/mkdir -p "$CONFIG_DIR/runtime"
+  /bin/chmod 700 "$CONFIG_DIR" "$CONFIG_DIR/runtime"
+  RUNTIME_DOWNLOAD_DIR="$(/usr/bin/mktemp -d "$CONFIG_DIR/runtime/.node-download.XXXXXX")"
+  archive_path="$RUNTIME_DOWNLOAD_DIR/$NODE_ARCHIVE"
+  print -u2 -- "Downloading the official Node.js $NODE_VERSION ARM64 runtime…"
+  if ! /usr/bin/curl --fail --location --silent --show-error --proto '=https' --tlsv1.2 \
+    --output "$archive_path" "$NODE_URL"; then
+    print -u2 -- "The official Node.js ARM64 runtime could not be downloaded. Check your internet connection and run Setup again."
+    return 1
+  fi
+
+  actual_checksum="$(/usr/bin/shasum -a 256 "$archive_path" | /usr/bin/awk '{print $1}')"
+  if [[ "$actual_checksum" != "$NODE_SHA256" ]]; then
+    print -u2 -- "The Node.js runtime checksum did not match the trusted release. Nothing was installed."
+    return 1
+  fi
+
+  /usr/bin/tar -xJf "$archive_path" -C "$RUNTIME_DOWNLOAD_DIR"
+  extracted_runtime="$RUNTIME_DOWNLOAD_DIR/node-v${NODE_VERSION}-darwin-arm64"
+  if ! runtime_is_valid "$extracted_runtime"; then
+    print -u2 -- "The downloaded Node.js runtime is incomplete or is not ARM64. Nothing was installed."
+    return 1
+  fi
+
+  previous_runtime="$RUNTIME_DOWNLOAD_DIR/previous-runtime"
+  if [[ -e "$RUNTIME_CACHE" ]]; then
+    /bin/mv "$RUNTIME_CACHE" "$previous_runtime"
+  fi
+  if ! /bin/mv "$extracted_runtime" "$RUNTIME_CACHE"; then
+    [[ -e "$previous_runtime" ]] && /bin/mv "$previous_runtime" "$RUNTIME_CACHE"
+    print -u2 -- "The verified Node.js runtime could not be stored. Nothing was installed."
+    return 1
+  fi
+  /bin/chmod -R go-rwx "$RUNTIME_CACHE"
+}
+
+ensure_runtime
+"$SCRIPT_DIR/app.sh" --source "$SOURCE_DIR" --output "$DESTINATION_APP" --runtime "$RUNTIME_CACHE" >/dev/null
 
 PROJECT_PATH_FILE="$CONFIG_DIR/project-path"
 INSTALL_PATH_FILE="$CONFIG_DIR/install-path"

@@ -20,6 +20,7 @@ __pycache__/
 /dist/
 /out/
 /release/
+/Control Module.app/
 /coverage/
 *.tsbuildinfo
 next-env.d.ts

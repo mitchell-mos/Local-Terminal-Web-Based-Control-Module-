@@ -32,14 +32,31 @@ LOG_MAX_BYTES = 2 * 1024 * 1024
 LOG_BACKUP_COUNT = 3
 REQUEST_TIMEOUT_SECONDS = 10.0
 MAX_REQUEST_THREADS = 24
-PROJECT_DIR = Path(__file__).resolve().parent
-PROJECTS_FILE = PROJECT_DIR / "control-projects.json"
-LOG_DIR = PROJECT_DIR / "control-logs"
-RUNTIME_DIR = PROJECT_DIR / ".control-runtime"
+
+
+def configured_web_port() -> int:
+    """Read the dashboard port while keeping direct runner launches safe."""
+    try:
+        candidate = int(os.environ.get("CONTROL_MODULE_WEB_PORT", "1025"))
+    except ValueError:
+        return 1025
+    if not 1025 <= candidate <= 65535 or candidate == PORT:
+        return 1025
+    return candidate
+
+
+WEB_PORT = configured_web_port()
+PROJECT_DIR = Path(__file__).resolve().parents[1]
+DEFAULT_DATA_DIR = PROJECT_DIR / ".control-module-data"
+DATA_DIR = Path(os.environ.get("CONTROL_MODULE_DATA_DIR", DEFAULT_DATA_DIR)).expanduser().resolve()
+PROJECTS_FILE = DATA_DIR / "projects.json"
+LOG_DIR = DATA_DIR / "logs" / "projects"
+RUNTIME_DIR = DATA_DIR / "runtime"
+BACKUP_DIR = DATA_DIR / "backups"
 SESSION_TOKEN_FILE = RUNTIME_DIR / "session-token"
 ALLOWED_ORIGINS = {
-    "http://127.0.0.1:1025",
-    "http://localhost:1025",
+    f"http://127.0.0.1:{WEB_PORT}",
+    f"http://localhost:{WEB_PORT}",
 }
 ALLOWED_HOSTS = {"127.0.0.1:10001", "localhost:10001"}
 SAFE_ENVIRONMENT_KEYS = {
@@ -157,9 +174,11 @@ def rotate_session_token() -> str:
 
 def secure_existing_runtime_files() -> None:
     """Tighten permissions on private files created by older releases."""
+    ensure_private_directory(DATA_DIR)
     ensure_private_directory(LOG_DIR)
     ensure_private_directory(RUNTIME_DIR)
-    private_files = [PROJECTS_FILE, *LOG_DIR.glob("*.log*")]
+    ensure_private_directory(BACKUP_DIR)
+    private_files = [PROJECTS_FILE, *LOG_DIR.glob("*.log*"), *BACKUP_DIR.glob("*.json")]
     for path in private_files:
         if not path.is_file():
             continue
@@ -179,7 +198,8 @@ def preserve_corrupt_projects() -> Path | None:
     global PROJECT_DATA_BACKUP
     if PROJECT_DATA_BACKUP is not None:
         return PROJECT_DATA_BACKUP
-    backup = PROJECTS_FILE.with_name(
+    ensure_private_directory(BACKUP_DIR)
+    backup = BACKUP_DIR / (
         f"control-projects.corrupt-{time.strftime('%Y%m%d-%H%M%S')}.json"
     )
     try:

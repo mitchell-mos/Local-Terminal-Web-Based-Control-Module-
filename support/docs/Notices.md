@@ -1,6 +1,6 @@
 # Third-party notices
 
-The locally bundled interface icons were downloaded through the Iconify API from these open icon collections:
+The locally bundled interface icons, including the native red trash-can icon, were downloaded through the Iconify API from these open icon collections:
 
 - Lucide Icons — ISC License — https://lucide.dev/license
 - Google Material Symbols — Apache License 2.0 — https://fonts.google.com/icons

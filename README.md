@@ -16,6 +16,25 @@ A packaged `Control Module.app` can include the standard open-source Node.js run
 
 ## Install and run
 
+### Guided macOS setup
+
+After downloading or cloning the project, double-click `Setup.app`. It uses native macOS prompts without opening Terminal and lets you:
+
+- choose the dashboard port, with `1025` as the recommended default;
+- install the launcher in your personal Applications folder or on the Desktop;
+- optionally create a Desktop shortcut;
+- optionally open Control Module as soon as setup finishes.
+
+The setup records the selected source folder, installation path, and dashboard port in `~/Library/Application Support/Control Module/` with permissions limited to your account. These local records are outside the repository, so personal filesystem paths are not committed or published. Rerun Setup after moving the source folder or whenever you want to change the dashboard port. The native apps use the same gear artwork as the web interface.
+
+After a successful installation, Setup moves itself from the root or Desktop into `support/Setup.app`. It stays visible after cancellation or an error so you can try again. To change the port or reinstall later, open the stored copy in `support/`.
+
+The generated app is ad-hoc signed for local use. Public downloadable releases should be signed and notarized with an Apple Developer ID before distribution; otherwise macOS may show an unidentified-developer warning.
+
+Maintainers can regenerate the native icon from `public/gear.svg` with `support/mac/icon.sh` and rebuild the native setup app with `support/mac/setup.sh`.
+
+### Terminal setup
+
 ```sh
 git clone <your-repository-url>
 cd control-module
@@ -25,9 +44,42 @@ chmod +x ControlModule
 ./ControlModule
 ```
 
-The launcher starts the dashboard at `http://127.0.0.1:1025` and the private command runner at `http://127.0.0.1:10001`. Both services bind only to the loopback interface. On first graphical launch, Control Module can ask permission to install packages and build the dashboard for you.
+### Uninstall
+
+Double-click `Uninstall.app`. Its trash-can icon distinguishes this destructive action from Setup and the main app. The native uninstaller:
+
+- safely stops Control Module and every project process it currently manages;
+- removes verified Control Module apps, Setup copies, and Desktop shortcuts;
+- clears its browser storage for both local hostnames without touching unrelated browser data;
+- permanently removes its saved commands, preferences, logs, tokens, and backups from Application Support;
+- optionally moves the complete source checkout to the macOS Trash after a separate confirmation.
+
+The uninstaller never deletes the external project folders or databases referenced by saved commands. If the source checkout is moved to Trash, empty the Trash later to erase that copy permanently.
+
+Maintainers can preview the exact uninstall targets without changing anything by running `support/mac/uninstall.sh --source "$PWD" --dry-run`.
+
+The launcher starts the dashboard at the port selected during Setup and the private command runner at `http://127.0.0.1:10001`. Both services bind only to the loopback interface. On first graphical launch, Control Module can ask permission to install packages and build the dashboard for you.
 
 No AI software is involved. A packaged app prefers its bundled standard Node.js runtime; a source checkout uses ordinary `node`, `pnpm`, and `python3` installations on the user's system.
+
+## Project layout
+
+| Path | Purpose |
+|---|---|
+| `app/` | Browser interface and styling |
+| `server/` | Loopback-only Python command runner |
+| `lib/` | Shared security headers and utilities |
+| `public/` | Local interface icons and static assets |
+| `support/docs/` | Runtime and third-party notes |
+| `support/mac/` | Native app assets and tools |
+| `support/Setup.app` | Setup after a successful installation |
+| `support/tests/` | JavaScript and Python tests |
+| `.github/` | GitHub guides and workflows |
+| `ControlModule` | Source and packaged-app launcher |
+| `Setup.app` | Initial guided setup; files itself under `support/` when finished |
+| `Uninstall.app` | Native guided removal |
+
+The root keeps only launch/runtime source and files that GitHub, Node.js, pnpm, TypeScript, or Vite require at standard paths. Auxiliary files live under `support/` with short names.
 
 ## What it does on your computer
 
@@ -43,17 +95,21 @@ Control Module does not scan arbitrary files, upload data, contact an AI service
 
 ## Private local data
 
-These files are created at runtime and are excluded by `.gitignore`:
+Normal launches keep private state outside the repository under `~/Library/Application Support/Control Module/`:
 
 | Path | Contents | Permissions |
 |---|---|---|
-| `control-projects.json` | Project names, ports, and commands | `0600` |
-| `control-logs/` | Per-project command output with rotation | directory `0700`, files `0600` |
-| `.control-runtime/session-token` | Random token authorizing this browser session; rotated when the runner starts | `0600` |
-| `control-module.log` | Local dashboard startup output | created under a private launcher umask |
-| `control-runner.log` | Local runner diagnostics | created under a private launcher umask |
+| `project-path` | Location selected by the local installer | `0600` |
+| `install-path` | Location of the locally installed app | `0600` |
+| `web-port` | Dashboard port selected during Setup | `0600` |
+| `data/projects.json` | Project names, ports, and commands | `0600` |
+| `data/logs/projects/` | Per-project command output with rotation | directory `0700`, files `0600` |
+| `data/runtime/session-token` | Random token authorizing this browser session; rotated when the runner starts | `0600` |
+| `data/logs/dashboard.log` | Local dashboard startup output | `0600` |
+| `data/logs/runner.log` | Local runner diagnostics | `0600` |
+| `data/backups/` | Private safety copies of unreadable or older project data | directory `0700`, files `0600` |
 
-Commands themselves are not copied into the per-project output logs. Logs rotate at 2 MiB and retain up to three prior files. Delete the paths above while Control Module is stopped to remove all saved local data.
+Commands themselves are not copied into the per-project output logs. Logs rotate at 2 MiB and retain up to three prior files. The launcher safely migrates data from older root-level locations on first run. Delete `~/Library/Application Support/Control Module/` while Control Module is stopped to remove all saved local settings and data.
 
 Before publishing a fork, review staged files with:
 
@@ -74,7 +130,7 @@ Never commit runtime JSON, logs, `.env` files, tokens, or project-specific files
 - A project command can still read or change anything the current macOS user can access. Review commands before starting them.
 - Do not expose either port through a reverse proxy, tunnel, router, public server, or port-forwarding rule.
 
-Please report vulnerabilities according to [SECURITY.md](SECURITY.md). Do not include private commands, tokens, logs, or filesystem paths in public reports.
+Please report vulnerabilities according to the [security policy](.github/SECURITY.md). Do not include private commands, tokens, logs, or filesystem paths in public reports.
 
 ## Development
 
@@ -91,7 +147,7 @@ pnpm run build
 pnpm audit
 ```
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) before submitting a change.
+See the [contribution guide](.github/CONTRIBUTING.md) before submitting a change.
 
 ## Disclaimer & intended use
 
@@ -109,5 +165,5 @@ Copyright © 2026 Mitchell Moscoso.
 
 Control Module is released under the [MIT License](LICENSE). Redistributions must retain the copyright and license notice.
 
-Third-party icon notices are listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
-Packaged runtime version, checksum, and download provenance are recorded in [BUNDLED_RUNTIME.md](BUNDLED_RUNTIME.md).
+Third-party icon notices are listed in [support/docs/Notices.md](support/docs/Notices.md).
+Packaged runtime version, checksum, and download provenance are recorded in [support/docs/Runtime.md](support/docs/Runtime.md).

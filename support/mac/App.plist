@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleDisplayName</key>
+  <string>Control Module</string>
+  <key>CFBundleExecutable</key>
+  <string>ControlModule</string>
+  <key>CFBundleIconFile</key>
+  <string>ControlModule</string>
+  <key>CFBundleIdentifier</key>
+  <string>io.github.mitchell-mos.control-module</string>
+  <key>CFBundleName</key>
+  <string>Control Module</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <key>CFBundleShortVersionString</key>
+  <string>1.0.0</string>
+  <key>CFBundleVersion</key>
+  <string>1</string>
+  <key>LSMinimumSystemVersion</key>
+  <string>13.0</string>
+  <key>LSUIElement</key>
+  <true/>
+  <key>NSHumanReadableCopyright</key>
+  <string>Copyright © 2026 Mitchell Moscoso</string>
+  <key>NSDesktopFolderUsageDescription</key>
+  <string>Control Module needs access to the source folder you selected on the Desktop in order to run the local dashboard and command runner.</string>
+</dict>
+</plist>

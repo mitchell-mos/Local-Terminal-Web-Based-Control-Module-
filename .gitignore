@@ -1,4 +1,5 @@
 # Local project data and private runtime state
+/.control-module-data/
 /control-projects.json
 /control-projects.corrupt-*.json
 /control-logs/
@@ -8,7 +9,7 @@
 /control-data.sqlite*
 
 # Python
-/__pycache__/
+__pycache__/
 *.py[cod]
 .pytest_cache/
 
@@ -18,6 +19,7 @@
 /.vinext/
 /dist/
 /out/
+/release/
 /coverage/
 *.tsbuildinfo
 next-env.d.ts

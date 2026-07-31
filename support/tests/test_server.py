@@ -15,8 +15,8 @@ import threading
 from pathlib import Path
 
 
-ROOT = Path(__file__).resolve().parents[1]
-SPEC = importlib.util.spec_from_file_location("control_server", ROOT / "control_server.py")
+ROOT = Path(__file__).resolve().parents[2]
+SPEC = importlib.util.spec_from_file_location("control_server", ROOT / "server" / "control_server.py")
 assert SPEC and SPEC.loader
 control_server = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(control_server)
@@ -30,9 +30,11 @@ class ControlServerTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
-        control_server.PROJECTS_FILE = self.root / "control-projects.json"
-        control_server.LOG_DIR = self.root / "control-logs"
-        control_server.RUNTIME_DIR = self.root / ".control-runtime"
+        control_server.DATA_DIR = self.root / "data"
+        control_server.PROJECTS_FILE = control_server.DATA_DIR / "projects.json"
+        control_server.LOG_DIR = control_server.DATA_DIR / "logs" / "projects"
+        control_server.RUNTIME_DIR = control_server.DATA_DIR / "runtime"
+        control_server.BACKUP_DIR = control_server.DATA_DIR / "backups"
         control_server.SESSION_TOKEN_FILE = control_server.RUNTIME_DIR / "session-token"
         control_server.SESSION_TOKEN = ""
         control_server.PROJECT_DATA_BACKUP = None
@@ -51,10 +53,11 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(private_mode(control_server.PROJECTS_FILE), 0o600)
 
     def test_corrupt_data_is_preserved_and_reported(self) -> None:
+        control_server.ensure_private_directory(control_server.PROJECTS_FILE.parent)
         control_server.PROJECTS_FILE.write_text("not-json", encoding="utf-8")
         with self.assertRaises(control_server.ProjectDataError):
             control_server.read_projects()
-        backups = list(self.root.glob("control-projects.corrupt-*.json"))
+        backups = list(control_server.BACKUP_DIR.glob("control-projects.corrupt-*.json"))
         self.assertEqual(len(backups), 1)
         self.assertEqual(backups[0].read_text(encoding="utf-8"), "not-json")
         self.assertEqual(private_mode(backups[0]), 0o600)
@@ -87,6 +90,20 @@ class ControlServerTests(unittest.TestCase):
         self.assertNotIn("CONTROL_MODULE_TEST_SECRET", environment)
         self.assertIn("PATH", environment)
         self.assertIn("HOME", environment)
+
+    def test_dashboard_port_configuration_is_validated(self) -> None:
+        previous = os.environ.get("CONTROL_MODULE_WEB_PORT")
+        try:
+            os.environ["CONTROL_MODULE_WEB_PORT"] = "14325"
+            self.assertEqual(control_server.configured_web_port(), 14325)
+            for invalid in ("not-a-port", "1024", "10001", "65536"):
+                os.environ["CONTROL_MODULE_WEB_PORT"] = invalid
+                self.assertEqual(control_server.configured_web_port(), 1025)
+        finally:
+            if previous is None:
+                os.environ.pop("CONTROL_MODULE_WEB_PORT", None)
+            else:
+                os.environ["CONTROL_MODULE_WEB_PORT"] = previous
 
     def test_runner_rejects_unauthorized_browser_requests(self) -> None:
         try:

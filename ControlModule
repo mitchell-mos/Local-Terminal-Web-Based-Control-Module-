@@ -4,19 +4,43 @@ set -u
 umask 077
 
 SELF_DIR="${0:A:h}"
-if [[ -n "${CONTROL_MODULE_DIR:-}" ]]; then
-  PROJECT_DIR="$CONTROL_MODULE_DIR"
-elif [[ -f "$SELF_DIR/package.json" ]]; then
-  PROJECT_DIR="$SELF_DIR"
-else
-  PROJECT_DIR="${SELF_DIR:h:h:h}/control module"
+USER_CONFIG_DIR="${CONTROL_MODULE_CONFIG_DIR:-$HOME/Library/Application Support/Control Module}"
+PROJECT_PATH_FILE="$USER_CONFIG_DIR/project-path"
+WEB_PORT_FILE="$USER_CONFIG_DIR/web-port"
+BUNDLED_PROJECT_DIR="$SELF_DIR/../Resources/control-module"
+CONFIGURED_PROJECT_DIR=""
+WEB_PORT="1025"
+
+if [[ -r "$PROJECT_PATH_FILE" ]]; then
+  IFS= read -r CONFIGURED_PROJECT_DIR < "$PROJECT_PATH_FILE" || true
+fi
+if [[ -r "$WEB_PORT_FILE" ]]; then
+  IFS= read -r WEB_PORT < "$WEB_PORT_FILE" || true
 fi
 
-WEB_URL="http://127.0.0.1:1025/"
+if [[ -n "${CONTROL_MODULE_DIR:-}" ]]; then
+  PROJECT_DIR="${CONTROL_MODULE_DIR:A}"
+elif [[ -f "$SELF_DIR/package.json" ]]; then
+  PROJECT_DIR="$SELF_DIR"
+elif [[ -f "$BUNDLED_PROJECT_DIR/package.json" ]]; then
+  PROJECT_DIR="${BUNDLED_PROJECT_DIR:A}"
+elif [[ -n "$CONFIGURED_PROJECT_DIR" && -f "$CONFIGURED_PROJECT_DIR/package.json" ]]; then
+  PROJECT_DIR="${CONFIGURED_PROJECT_DIR:A}"
+else
+  PROJECT_DIR=""
+fi
+
+WEB_URL="http://127.0.0.1:$WEB_PORT/"
 RUNNER_URL="http://127.0.0.1:10001/health"
-TOKEN_FILE="$PROJECT_DIR/.control-runtime/session-token"
-WEB_LOG="$PROJECT_DIR/control-module.log"
-RUNNER_LOG="$PROJECT_DIR/control-runner.log"
+USER_DATA_DIR="${CONTROL_MODULE_DATA_DIR:-$USER_CONFIG_DIR/data}"
+PROJECT_DATA_FILE="$USER_DATA_DIR/projects.json"
+PROJECT_LOG_DIR="$USER_DATA_DIR/logs/projects"
+RUNTIME_DIR="$USER_DATA_DIR/runtime"
+BACKUP_DIR="$USER_DATA_DIR/backups"
+TOKEN_FILE="$RUNTIME_DIR/session-token"
+WEB_LOG="$USER_DATA_DIR/logs/dashboard.log"
+RUNNER_LOG="$USER_DATA_DIR/logs/runner.log"
+SERVER_FILE="$PROJECT_DIR/server/control_server.py"
 WEB_PID=""
 RUNNER_PID=""
 BUNDLED_NODE="$SELF_DIR/../Resources/runtime/bin/node"
@@ -91,10 +115,59 @@ cleanup() {
   fi
 }
 
+move_legacy_file() {
+  local source_file="$1"
+  local destination_file="$2"
+  if [[ -f "$source_file" && ! -e "$destination_file" ]]; then
+    /bin/mv "$source_file" "$destination_file"
+  fi
+}
+
+prepare_private_data() {
+  local legacy_log legacy_backup
+  local migration_failed=0
+  /bin/mkdir -p "$PROJECT_LOG_DIR" "$RUNTIME_DIR" "$BACKUP_DIR"
+  /bin/chmod 700 "$USER_CONFIG_DIR" "$USER_DATA_DIR" "$USER_DATA_DIR/logs" "$PROJECT_LOG_DIR" "$RUNTIME_DIR" "$BACKUP_DIR" 2>/dev/null || true
+
+  move_legacy_file "$PROJECT_DIR/control-projects.json" "$PROJECT_DATA_FILE" || migration_failed=1
+  move_legacy_file "$PROJECT_DIR/control-module.log" "$WEB_LOG" || migration_failed=1
+  move_legacy_file "$PROJECT_DIR/control-runner.log" "$RUNNER_LOG" || migration_failed=1
+  move_legacy_file "$PROJECT_DIR/.control-runtime/session-token" "$TOKEN_FILE" || migration_failed=1
+  move_legacy_file "$PROJECT_DIR/.control-runtime/control-projects.pre-hardening-backup.json" "$BACKUP_DIR/control-projects.pre-hardening-backup.json" || migration_failed=1
+
+  for legacy_log in "$PROJECT_DIR/control-logs/"*.log*(N); do
+    move_legacy_file "$legacy_log" "$PROJECT_LOG_DIR/${legacy_log:t}" || migration_failed=1
+  done
+  for legacy_backup in "$PROJECT_DIR/"control-projects.corrupt-*.json(N); do
+    move_legacy_file "$legacy_backup" "$BACKUP_DIR/${legacy_backup:t}" || migration_failed=1
+  done
+
+  /bin/rmdir "$PROJECT_DIR/control-logs" "$PROJECT_DIR/.control-runtime" 2>/dev/null || true
+  /usr/bin/find "$USER_DATA_DIR" -type f -exec /bin/chmod 600 {} + 2>/dev/null || true
+  (( migration_failed == 0 ))
+}
+
 if [[ ! -d "$PROJECT_DIR" || ! -f "$PROJECT_DIR/package.json" ]]; then
-  show_error "The Control Module project folder could not be found. Set CONTROL_MODULE_DIR to its location."
+  show_error "The Control Module project folder could not be found. Run Setup again, or set CONTROL_MODULE_DIR to the source folder."
   exit 1
 fi
+
+if [[ "$WEB_PORT" != <-> ]] || (( WEB_PORT < 1025 || WEB_PORT > 65535 || WEB_PORT == 10001 )); then
+  show_error "The configured dashboard port is invalid. Run Setup again and choose 1025–65535, excluding 10001."
+  exit 1
+fi
+
+if [[ ! -f "$SERVER_FILE" ]]; then
+  show_error "The local runner was not found at server/control_server.py. Reinstall Control Module from a complete source folder."
+  exit 1
+fi
+
+if ! prepare_private_data; then
+  show_error "Existing private data could not be moved safely. Check access to the selected source folder, then rerun setup. Nothing was overwritten."
+  exit 1
+fi
+export CONTROL_MODULE_DATA_DIR="$USER_DATA_DIR"
+export CONTROL_MODULE_WEB_PORT="$WEB_PORT"
 
 PNPM="$(command -v pnpm || true)"
 COREPACK="$(command -v corepack || true)"
@@ -119,7 +192,7 @@ needs_setup=0
 [[ -d node_modules ]] || needs_setup=1
 [[ -f dist/server/index.js ]] || needs_setup=1
 if [[ -f dist/server/index.js ]]; then
-  for source_file in app/page.tsx app/globals.css app/layout.tsx proxy.ts next.config.ts security-headers.ts package.json pnpm-lock.yaml pnpm-workspace.yaml vite.config.ts; do
+  for source_file in app/page.tsx app/globals.css app/layout.tsx proxy.ts next.config.ts lib/security-headers.ts package.json pnpm-lock.yaml pnpm-workspace.yaml vite.config.ts; do
     [[ "$source_file" -nt dist/server/index.js ]] && needs_setup=1
   done
 fi
@@ -133,11 +206,11 @@ if [[ "$needs_setup" == "1" ]]; then
     exit 1
   fi
   run_pnpm install --frozen-lockfile >>"$WEB_LOG" 2>&1 || {
-    show_error "Package installation failed. Check control-module.log."
+    show_error "Package installation failed. Check data/logs/dashboard.log in Control Module's Application Support folder."
     exit 1
   }
   run_pnpm run build >>"$WEB_LOG" 2>&1 || {
-    show_error "The dashboard build failed. Check control-module.log."
+    show_error "The dashboard build failed. Check data/logs/dashboard.log in Control Module's Application Support folder."
     exit 1
   }
 fi
@@ -148,9 +221,9 @@ if [[ ! -f "$VINEXT_CLI" ]]; then
   exit 1
 fi
 
-/bin/chmod 700 "$PROJECT_DIR/.control-runtime" "$PROJECT_DIR/control-logs" 2>/dev/null || true
-/usr/bin/find "$PROJECT_DIR/.control-runtime" "$PROJECT_DIR/control-logs" -type f -exec /bin/chmod 600 {} + 2>/dev/null || true
-for private_file in "$WEB_LOG" "$RUNNER_LOG" "$PROJECT_DIR/control-projects.json"; do
+/bin/chmod 700 "$USER_CONFIG_DIR" "$USER_DATA_DIR" "$USER_DATA_DIR/logs" "$PROJECT_LOG_DIR" "$RUNTIME_DIR" "$BACKUP_DIR" 2>/dev/null || true
+/usr/bin/find "$USER_DATA_DIR" -type f -exec /bin/chmod 600 {} + 2>/dev/null || true
+for private_file in "$WEB_LOG" "$RUNNER_LOG" "$PROJECT_DATA_FILE"; do
   [[ -f "$private_file" ]] && /bin/chmod 600 "$private_file"
 done
 
@@ -159,8 +232,8 @@ if web_ready && runner_ready; then
   exit 0
 fi
 
-if ! web_ready && /usr/sbin/lsof -nP -iTCP:1025 -sTCP:LISTEN >/dev/null 2>&1; then
-  show_error "Port 1025 is already being used by another program."
+if ! web_ready && /usr/sbin/lsof -nP -iTCP:"$WEB_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+  show_error "Port $WEB_PORT is already being used by another program. Run Setup and choose another port."
   exit 1
 fi
 
@@ -170,12 +243,12 @@ if ! runner_ready && /usr/sbin/lsof -nP -iTCP:10001 -sTCP:LISTEN >/dev/null 2>&1
 fi
 
 if ! runner_ready; then
-  "$PYTHON" "$PROJECT_DIR/control_server.py" >>"$RUNNER_LOG" 2>&1 &
+  "$PYTHON" "$SERVER_FILE" >>"$RUNNER_LOG" 2>&1 &
   RUNNER_PID=$!
 fi
 
 if ! web_ready; then
-  "$NODE" "$VINEXT_CLI" start --hostname 127.0.0.1 --port 1025 >>"$WEB_LOG" 2>&1 &
+  "$NODE" "$VINEXT_CLI" start --hostname 127.0.0.1 --port "$WEB_PORT" >>"$WEB_LOG" 2>&1 &
   WEB_PID=$!
 fi
 

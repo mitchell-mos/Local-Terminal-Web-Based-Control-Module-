@@ -1,5 +1,5 @@
 import type { NextConfig } from "next";
-import { SECURITY_HEADERS } from "./security-headers";
+import { SECURITY_HEADERS } from "./lib/security-headers";
 
 const nextConfig: NextConfig = {
   async headers() {

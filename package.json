@@ -12,9 +12,9 @@
     "build": "vinext build",
     "start": "vinext start --hostname 127.0.0.1 --port 1025",
     "typecheck": "tsc --noEmit --incremental false",
-    "lint": "oxlint --deny-warnings app tests proxy.ts next.config.ts security-headers.ts vite.config.ts",
-    "test:unit": "node --test tests/*.test.mjs",
-    "test:python": "python3 -B -m unittest discover -s tests -p 'test_*.py'",
+    "lint": "oxlint --deny-warnings app lib server support/tests proxy.ts next.config.ts vite.config.ts",
+    "test:unit": "node --test support/tests/*.test.mjs",
+    "test:python": "python3 -B -m unittest discover -s support/tests -p 'test_*.py'",
     "test": "pnpm run typecheck && pnpm run lint && pnpm run test:unit && pnpm run test:python"
   },
   "dependencies": {

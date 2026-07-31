@@ -1,0 +1,14 @@
+import { NextResponse } from "next/server";
+import { SECURITY_HEADERS } from "./security-headers";
+
+export function proxy() {
+  const response = NextResponse.next();
+  for (const { key, value } of SECURITY_HEADERS) {
+    response.headers.set(key, value);
+  }
+  return response;
+}
+
+export const config = {
+  matcher: "/:path*",
+};

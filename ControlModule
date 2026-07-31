@@ -1,0 +1,196 @@
+#!/bin/zsh
+
+set -u
+umask 077
+
+SELF_DIR="${0:A:h}"
+if [[ -n "${CONTROL_MODULE_DIR:-}" ]]; then
+  PROJECT_DIR="$CONTROL_MODULE_DIR"
+elif [[ -f "$SELF_DIR/package.json" ]]; then
+  PROJECT_DIR="$SELF_DIR"
+else
+  PROJECT_DIR="${SELF_DIR:h:h:h}/control module"
+fi
+
+WEB_URL="http://127.0.0.1:1025/"
+RUNNER_URL="http://127.0.0.1:10001/health"
+TOKEN_FILE="$PROJECT_DIR/.control-runtime/session-token"
+WEB_LOG="$PROJECT_DIR/control-module.log"
+RUNNER_LOG="$PROJECT_DIR/control-runner.log"
+WEB_PID=""
+RUNNER_PID=""
+BUNDLED_NODE="$SELF_DIR/../Resources/runtime/bin/node"
+BASE_PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
+if [[ -x "$BUNDLED_NODE" ]]; then
+  NODE="$BUNDLED_NODE"
+  export PATH="${BUNDLED_NODE:h}:$BASE_PATH"
+else
+  export PATH="$BASE_PATH"
+  NODE="$(command -v node || true)"
+fi
+export CONTROL_MODULE_PROJECT_PATH="$PATH"
+
+show_error() {
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    /usr/bin/osascript -e "display alert \"Control Module could not start\" message \"$1\" as critical" >/dev/null 2>&1
+  else
+    print -u2 -- "Control Module could not start: $1"
+  fi
+}
+
+confirm_setup() {
+  if [[ "$(uname -s)" != "Darwin" ]]; then
+    return 1
+  fi
+  /usr/bin/osascript <<'APPLESCRIPT' >/dev/null 2>&1
+display dialog "Control Module needs to install its open-source packages and build the local dashboard. Nothing is sent to an AI service." with title "Set up Control Module?" buttons {"Cancel", "Install"} default button "Install" cancel button "Cancel"
+APPLESCRIPT
+}
+
+session_token() {
+  if [[ -r "$TOKEN_FILE" ]]; then
+    /bin/cat "$TOKEN_FILE" | /usr/bin/tr -d '\r\n'
+  fi
+}
+
+web_ready() {
+  /usr/bin/curl -fsS "$WEB_URL" 2>/dev/null | /usr/bin/grep -q "Control Module"
+}
+
+runner_ready() {
+  local token
+  token="$(session_token)"
+  [[ -n "$token" ]] || return 1
+  /usr/bin/curl -fsS -H "X-Control-Token: $token" "$RUNNER_URL" 2>/dev/null | /usr/bin/grep -q '"ok": true'
+}
+
+open_control_module() {
+  local token url
+  token="$(session_token)"
+  [[ -n "$token" ]] || return 1
+  url="${WEB_URL}#token=${token}"
+  if [[ "${CONTROL_MODULE_NO_OPEN:-0}" == "1" ]]; then
+    return 0
+  fi
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    /usr/bin/open "$url"
+  elif command -v xdg-open >/dev/null 2>&1; then
+    xdg-open "$url" >/dev/null 2>&1
+  else
+    print -- "$url"
+  fi
+}
+
+cleanup() {
+  if [[ -n "$WEB_PID" ]]; then
+    /bin/kill "$WEB_PID" >/dev/null 2>&1
+  fi
+  if [[ -n "$RUNNER_PID" ]]; then
+    /bin/kill "$RUNNER_PID" >/dev/null 2>&1
+  fi
+}
+
+if [[ ! -d "$PROJECT_DIR" || ! -f "$PROJECT_DIR/package.json" ]]; then
+  show_error "The Control Module project folder could not be found. Set CONTROL_MODULE_DIR to its location."
+  exit 1
+fi
+
+PNPM="$(command -v pnpm || true)"
+COREPACK="$(command -v corepack || true)"
+PYTHON="$(command -v python3 || true)"
+if [[ -z "$NODE" || -z "$PYTHON" ]]; then
+  show_error "Install Node.js 22 or newer and Python 3, then reopen Control Module. No Codex, ChatGPT, or LLM is required."
+  exit 1
+fi
+
+run_pnpm() {
+  if [[ -n "$PNPM" ]]; then
+    "$PNPM" "$@"
+  else
+    "$COREPACK" pnpm "$@"
+  fi
+}
+
+cd "$PROJECT_DIR" || exit 1
+trap cleanup EXIT HUP INT TERM
+
+needs_setup=0
+[[ -d node_modules ]] || needs_setup=1
+[[ -f dist/server/index.js ]] || needs_setup=1
+if [[ -f dist/server/index.js ]]; then
+  for source_file in app/page.tsx app/globals.css app/layout.tsx proxy.ts next.config.ts security-headers.ts package.json pnpm-lock.yaml pnpm-workspace.yaml vite.config.ts; do
+    [[ "$source_file" -nt dist/server/index.js ]] && needs_setup=1
+  done
+fi
+if [[ "$needs_setup" == "1" ]]; then
+  if [[ -z "$PNPM" && -z "$COREPACK" ]]; then
+    show_error "This source copy needs pnpm to install packages and build the dashboard. Install pnpm, then reopen Control Module."
+    exit 1
+  fi
+  if [[ "${CONTROL_MODULE_AUTO_SETUP:-0}" != "1" ]] && ! confirm_setup; then
+    show_error "Setup was cancelled. Run pnpm install --frozen-lockfile and pnpm run build in the project folder when you are ready."
+    exit 1
+  fi
+  run_pnpm install --frozen-lockfile >>"$WEB_LOG" 2>&1 || {
+    show_error "Package installation failed. Check control-module.log."
+    exit 1
+  }
+  run_pnpm run build >>"$WEB_LOG" 2>&1 || {
+    show_error "The dashboard build failed. Check control-module.log."
+    exit 1
+  }
+fi
+
+VINEXT_CLI="$PROJECT_DIR/node_modules/vinext/dist/cli.js"
+if [[ ! -f "$VINEXT_CLI" ]]; then
+  show_error "The local dashboard runtime is incomplete. Run pnpm install --frozen-lockfile and pnpm run build."
+  exit 1
+fi
+
+/bin/chmod 700 "$PROJECT_DIR/.control-runtime" "$PROJECT_DIR/control-logs" 2>/dev/null || true
+/usr/bin/find "$PROJECT_DIR/.control-runtime" "$PROJECT_DIR/control-logs" -type f -exec /bin/chmod 600 {} + 2>/dev/null || true
+for private_file in "$WEB_LOG" "$RUNNER_LOG" "$PROJECT_DIR/control-projects.json"; do
+  [[ -f "$private_file" ]] && /bin/chmod 600 "$private_file"
+done
+
+if web_ready && runner_ready; then
+  open_control_module
+  exit 0
+fi
+
+if ! web_ready && /usr/sbin/lsof -nP -iTCP:1025 -sTCP:LISTEN >/dev/null 2>&1; then
+  show_error "Port 1025 is already being used by another program."
+  exit 1
+fi
+
+if ! runner_ready && /usr/sbin/lsof -nP -iTCP:10001 -sTCP:LISTEN >/dev/null 2>&1; then
+  show_error "Port 10001 is already being used by another program."
+  exit 1
+fi
+
+if ! runner_ready; then
+  "$PYTHON" "$PROJECT_DIR/control_server.py" >>"$RUNNER_LOG" 2>&1 &
+  RUNNER_PID=$!
+fi
+
+if ! web_ready; then
+  "$NODE" "$VINEXT_CLI" start --hostname 127.0.0.1 --port 1025 >>"$WEB_LOG" 2>&1 &
+  WEB_PID=$!
+fi
+
+for attempt in {1..80}; do
+  if web_ready && runner_ready; then
+    open_control_module
+    if [[ -n "$WEB_PID" ]]; then
+      wait "$WEB_PID"
+    elif [[ -n "$RUNNER_PID" ]]; then
+      wait "$RUNNER_PID"
+    fi
+    exit $?
+  fi
+  /bin/sleep 0.25
+done
+
+show_error "The local services did not respond. Check the private Control Module log files for details."
+exit 1

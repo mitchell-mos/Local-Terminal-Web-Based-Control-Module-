@@ -1,0 +1,12 @@
+packages:
+  - "."
+
+allowBuilds:
+  sharp: true
+  unrs-resolver: false
+
+overrides:
+  postcss: 8.5.18
+  sharp: 0.35.0
+  undici: 7.28.0
+  ws: 8.21.0

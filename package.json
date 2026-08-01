@@ -11,8 +11,10 @@
     "dev": "vinext dev --hostname 127.0.0.1 --port 1025",
     "build": "vinext build",
     "start": "vinext start --hostname 127.0.0.1 --port 1025",
+    "version:bump": "node support/version.mjs bump",
+    "version:check": "node support/version.mjs check",
     "typecheck": "tsc --noEmit --incremental false",
-    "lint": "oxlint --deny-warnings app lib server support/tests proxy.ts next.config.ts vite.config.ts",
+    "lint": "oxlint --deny-warnings app lib server support/version.mjs support/tests proxy.ts next.config.ts vite.config.ts",
     "test:unit": "node --test support/tests/*.test.mjs",
     "test:python": "python3 -B -m unittest discover -s support/tests -p 'test_*.py'",
     "test": "pnpm run typecheck && pnpm run lint && pnpm run test:unit && pnpm run test:python"

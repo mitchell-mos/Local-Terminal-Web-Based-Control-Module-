@@ -1,0 +1,35 @@
+name: Version policy
+
+on:
+  push:
+
+permissions:
+  contents: read
+
+jobs:
+  version:
+    name: Check version increment
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Find version before push
+        id: previous
+        shell: bash
+        env:
+          BEFORE_PUSH: ${{ github.event.before }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          previous="$BEFORE_PUSH"
+          if [[ "$previous" =~ ^0+$ ]]; then
+            git fetch --no-tags origin "$DEFAULT_BRANCH"
+            previous="$(git merge-base HEAD "origin/$DEFAULT_BRANCH")"
+          fi
+          echo "ref=$previous" >> "$GITHUB_OUTPUT"
+
+      - name: Check version increment
+        run: node support/version.mjs check "${{ steps.previous.outputs.ref }}"

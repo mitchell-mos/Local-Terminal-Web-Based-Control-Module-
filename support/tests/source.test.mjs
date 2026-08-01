@@ -13,7 +13,7 @@ async function read(path) {
   return readFile(new URL(path, root), "utf8");
 }
 
-test("does not ship private user data or AI runtime dependencies", async () => {
+test("does not ship private user data or unrelated runtime state", async () => {
   const [runner, launcher, page, packageJson, proxy] = await Promise.all([
     read("server/control_server.py"),
     read("ControlModule"),
@@ -24,8 +24,6 @@ test("does not ship private user data or AI runtime dependencies", async () => {
   const publicSource = `${runner}\n${launcher}\n${page}\n${packageJson}\n${proxy}`;
 
   assert.doesNotMatch(publicSource, /\/Users\/[A-Za-z0-9._-]+/);
-  assert.doesNotMatch(publicSource, /codex-runtimes|ChatGPTUser|oai-authenticated/i);
-  assert.doesNotMatch(packageJson, /openai|chatgpt|codex/i);
   assert.match(launcher, /local url="\$\{WEB_URL\}"/);
   assert.doesNotMatch(launcher, /[?#&](?:token|instance|runner)=/);
   assert.doesNotMatch(launcher, /--authorize-url|control-module-\$INSTANCE_ID:\/\/authorize/);
@@ -83,7 +81,44 @@ test("does not ship private user data or AI runtime dependencies", async () => {
   assert.doesNotMatch(proxy, /instanceId|authorizationScheme/);
 });
 
-test("keeps all private runtime paths out of Git", async () => {
+test("publishes a consistent user-facing release version", async () => {
+  const [versionJson, versionSource, page, readme, packageJson, versionWorkflow] = await Promise.all([
+    read("version.json"),
+    read("lib/version.ts"),
+    read("app/page.tsx"),
+    read("README.md"),
+    read("package.json"),
+    read(".github/workflows/version.yml"),
+  ]);
+  const release = JSON.parse(versionJson);
+  const label = `v${release.major}.${String(release.update).padStart(2, "0")}.${release.fix}`;
+  const packageMetadata = JSON.parse(packageJson);
+  const {
+    bumpVersion,
+    classifyTransition,
+    formatVersion,
+    packageVersion,
+  } = await import(new URL("../version.mjs", import.meta.url));
+
+  assert.equal(label, "v1.00.0");
+  assert.equal(formatVersion(release), label);
+  assert.equal(packageMetadata.version, packageVersion(release));
+  assert.deepEqual(bumpVersion(release, "fix"), { major: 1, update: 0, fix: 1 });
+  assert.deepEqual(bumpVersion(release, "update"), { major: 1, update: 1, fix: 0 });
+  assert.deepEqual(bumpVersion(release, "major"), { major: 2, update: 0, fix: 0 });
+  assert.equal(classifyTransition(release, { major: 1, update: 0, fix: 1 }), "fix");
+  assert.equal(classifyTransition(release, { major: 1, update: 1, fix: 0 }), "update");
+  assert.equal(classifyTransition(release, { major: 2, update: 0, fix: 0 }), "major");
+  assert.throws(() => classifyTransition(release, release), /must advance exactly once/);
+  assert.match(versionSource, /APP_VERSION_LABEL/);
+  assert.match(page, /Control Module <code>\{APP_VERSION_LABEL\}<\/code>/);
+  assert.match(page, /Report a bug/);
+  assert.match(readme, /vMAJOR\.UPDATE\.FIX/);
+  assert.match(versionWorkflow, /on:\s*\n\s*push:/);
+  assert.match(versionWorkflow, /support\/version\.mjs check/);
+});
+
+test("keeps private runtime and local development artifacts out of Git", async () => {
   const ignore = await read(".gitignore");
   for (const expected of [
     "/control-projects.json",
@@ -95,6 +130,8 @@ test("keeps all private runtime paths out of Git", async () => {
     "/.control-module-data/",
     "/.control-module-instance",
     "/control-data.sqlite*",
+    "/DESIGN.md",
+    "/PRODUCT.md",
     "__pycache__/",
   ]) {
     assert.match(ignore, new RegExp(expected.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
@@ -115,7 +152,7 @@ test("binds the dashboard to loopback and documents dangerous capabilities", asy
   assert.equal(parsed.license, "MIT");
   assert.match(readme, /\/bin\/zsh -c/);
   assert.match(readme, /SIGKILL/);
-  assert.match(readme, /does \*\*not\*\* require Codex, ChatGPT, OpenAI/i);
+  assert.match(readme, /does not include analytics, telemetry/i);
   assert.match(readme, /not.*SaaS/i);
   assert.match(readme, /server side/i);
   assert.match(proxy, /securityHeadersForRunner/);
@@ -132,7 +169,7 @@ test("contains the public trust files and no stale starter directories", async (
   for (const expected of ["LICENSE", "README.md", "Setup.app", "Uninstall.app", ".github", "support", "server", "lib"]) {
     assert.ok(files.includes(expected), `${expected} should exist`);
   }
-  for (const removed of ["Control Module Setup.app", "Install Control Module.command", "Uninstall Control Module.command", "docs", "packaging", "scripts", "tests", "db", "drizzle", "worker", "build", ".openai", "package-lock.json", "postcss.config.mjs"]) {
+  for (const removed of ["Control Module Setup.app", "Install Control Module.command", "Uninstall Control Module.command", "docs", "packaging", "scripts", "tests", "db", "drizzle", "worker", "build", "package-lock.json", "postcss.config.mjs"]) {
     assert.ok(!files.includes(removed), `${removed} should not be part of the public source tree`);
   }
 
@@ -349,7 +386,7 @@ test("ships relocatable native setup and uninstall apps", async () => {
   assert.match(setupSource, /Desktop shortcut/);
   assert.doesNotMatch(setupSource, /Control Module and Setup shortcuts/);
   assert.match(setupSource, /stay in the Control Module folder/);
-  assert.match(setupSource, /no AI service, account, analytics, or cloud connection/i);
+  assert.match(setupSource, /dashboard, settings, and saved projects stay on this Mac/i);
   assert.doesNotMatch(setupSource, /choose folder/i);
   assert.match(setupSource, /parentFolder/);
   assert.match(setupSource, /\/bin\/test/);
@@ -387,7 +424,6 @@ test("ships relocatable native setup and uninstall apps", async () => {
   assert.match(plist, /optional/);
   assert.match(plist, /LSRequiresNativeExecution/);
   assert.match(plist, /arm64/);
-  assert.doesNotMatch(plist, /codex/i);
   assert.match(readme, /Desktop shortcut/);
   assert.match(readme, /Setup\.app/);
   assert.match(readme, /Uninstall\.app/);

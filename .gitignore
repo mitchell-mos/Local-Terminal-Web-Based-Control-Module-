@@ -31,7 +31,7 @@ next-env.d.ts
 !.env.example
 *.pem
 
-# Package-manager and tool caches
+# Package-manager and deployment caches
 .pnp
 .pnp.*
 .yarn/*
@@ -40,11 +40,13 @@ next-env.d.ts
 !.yarn/releases
 !.yarn/versions
 /.wrangler/
-/.openai/
-/.impeccable/
 /.vercel/
 /outputs/
 /work/
+
+# Generated design working notes
+/DESIGN.md
+/PRODUCT.md
 
 # Debug logs
 npm-debug.log*
@@ -57,3 +59,6 @@ yarn-error.log*
 Thumbs.db
 .idea/
 .vscode/
+*.code-workspace
+*.swp
+*.swo

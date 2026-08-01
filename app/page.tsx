@@ -3,6 +3,8 @@
 import type { ChangeEvent, DragEvent as ReactDragEvent, FormEvent, KeyboardEvent as ReactKeyboardEvent } from "react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
+import { APP_VERSION_LABEL } from "@/lib/version";
+
 type Host = "localhost" | "127.0.0.1";
 type Theme = "light" | "dark";
 type ToastKind = "success" | "error" | "info";
@@ -194,6 +196,11 @@ const PROJECT_TRANSFER_FORMAT = "control-module-projects";
 const PROJECT_TRANSFER_VERSION = 1;
 const MAX_TRANSFER_FILE_BYTES = 1024 * 1024;
 const MAX_TRANSFER_PROJECTS = 100;
+const PROJECT_REPOSITORY_URL = "https://github.com/mitchell-mos/Local-Terminal-Web-Based-Control-Module-";
+const REPORT_BUG_URL = `${PROJECT_REPOSITORY_URL}/issues/new?${new URLSearchParams({
+  title: `[${APP_VERSION_LABEL}] `,
+  body: `Version: ${APP_VERSION_LABEL}\n\nWhat happened?\n\nWhat did you expect?\n\nSteps to reproduce:\n1. \n\nPlease remove private paths, commands, and logs before submitting.`,
+}).toString()}`;
 const BROWSER_BLOCKED_PORT_ROWS = [
   { port: 1719, reason: "Browser blocked · H.323" },
   { port: 1720, reason: "Browser blocked · H.323" },
@@ -3928,6 +3935,34 @@ export default function Home() {
           </>
         )}
       </section>
+
+      <footer className="app-footer" aria-label="Application information">
+        <div className="app-footer-summary">
+          <strong>
+            Control Module <code>{APP_VERSION_LABEL}</code>
+          </strong>
+          <span>Local only · No telemetry</span>
+        </div>
+        <nav className="app-footer-links" aria-label="Help and legal">
+          <a
+            href={`${PROJECT_REPOSITORY_URL}#readme`}
+            target="_blank"
+            rel="noreferrer"
+          >
+            User guide
+          </a>
+          <a href={REPORT_BUG_URL} target="_blank" rel="noreferrer">
+            Report a bug
+          </a>
+          <a
+            href={`${PROJECT_REPOSITORY_URL}/blob/main/LICENSE`}
+            target="_blank"
+            rel="noreferrer"
+          >
+            MIT License
+          </a>
+        </nav>
+      </footer>
 
       {appSettingsOpen && (
         <div

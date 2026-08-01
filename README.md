@@ -2,7 +2,7 @@
 
 Control Module is an open-source, local-only dashboard for starting, stopping, and restarting development projects from one browser page. It is designed for a single user on their own computer.
 
-Control Module does **not** require Codex, ChatGPT, OpenAI, or any other AI/LLM service. It does not include analytics, telemetry, advertising, accounts, cloud storage, or a remote backend.
+Control Module does not include analytics, telemetry, advertising, accounts, cloud storage, or a remote backend.
 
 ## Requirements
 
@@ -13,7 +13,7 @@ Control Module does **not** require Codex, ChatGPT, OpenAI, or any other AI/LLM 
 - Python 3.11 or newer
 - `lsof`, `ioreg`, and `zsh`, which are included with macOS
 
-Setup downloads the official ARM64 Node.js runtime directly from nodejs.org when it is not already cached, verifies its pinned SHA-256 checksum, and includes the complete runtime in `Control Module.app`. Double-clicking the installed app therefore does not require a system Node.js or pnpm installation. Python 3.11 or newer is still required for the local command runner. No runtime is obtained from Codex, ChatGPT, or another LLM.
+Setup downloads the official ARM64 Node.js runtime directly from nodejs.org when it is not already cached, verifies its pinned SHA-256 checksum, and includes the complete runtime in `Control Module.app`. Double-clicking the installed app therefore does not require a system Node.js or pnpm installation. Python 3.11 or newer is still required for the local command runner.
 
 ## Install and run
 
@@ -72,7 +72,7 @@ Maintainers can preview the exact native-app uninstall without changing anything
 
 The launcher starts the dashboard at the port selected during Setup and an automatically assigned private command-runner port. Both services bind only to the loopback interface. On first graphical launch, Control Module can ask permission to install packages and build the dashboard for you.
 
-No AI software is involved. A packaged app prefers its bundled standard Node.js runtime; a source checkout uses ordinary `node`, `pnpm`, and `python3` installations on the user's system.
+A packaged app prefers its bundled standard Node.js runtime; a source checkout uses ordinary `node`, `pnpm`, and `python3` installations on the user's system.
 
 ## Project layout
 
@@ -103,7 +103,7 @@ Control Module has the same authority as the macOS account that launches it. It 
 - checks the macOS console lock flag with `ioreg` every five seconds and stops managed projects after the Mac remains locked for 15 minutes;
 - stores project settings and local command output on disk.
 
-Control Module does not crawl project folders, upload data, contact an AI service, install detected project dependencies, or signal processes that it did not launch and verify. Commands run with a minimal environment instead of inheriting tokens or unrelated environment variables from the launcher.
+Control Module does not crawl project folders, upload data, install detected project dependencies, or signal processes that it did not launch and verify. Commands run with a minimal environment instead of inheriting tokens or unrelated environment variables from the launcher.
 
 ## Private local data
 
@@ -138,6 +138,8 @@ git diff --cached
 
 Never commit runtime JSON, logs, `.env` files, tokens, or project-specific filesystem paths.
 
+Local development-tool configuration and generated working notes are excluded by `.gitignore`. The repository keeps only application source, required configuration, public documentation, tests, native app resources, and GitHub project files.
+
 ## Security model
 
 - The dashboard and runner are loopback-only and are not intended to accept LAN or internet traffic.
@@ -166,6 +168,32 @@ pnpm audit
 ```
 
 See the [contribution guide](.github/CONTRIBUTING.md) before submitting a change.
+
+## Version numbers
+
+The dashboard footer shows the installed release in the format `vMAJOR.UPDATE.FIX`, such as `v1.00.0`:
+
+- `MAJOR` increases for a major product change;
+- `UPDATE` is always shown with two digits and increases for a regular feature or update release;
+- `FIX` increases for a small change or bug fix within that update.
+
+Include the footer version when reporting a bug so maintainers can identify the affected release. The user-facing version is set in [`version.json`](version.json); `package.json` keeps the standard unpadded semantic-version format required by Node.js tooling.
+
+Every GitHub push must advance the version exactly once. Choose the level from the largest change included in that push:
+
+- `major` for a compatibility break, broad redesign, storage migration, or security-model change;
+- `update` for a new user-facing capability or meaningful workflow improvement;
+- `fix` for a bug fix, copy change, documentation, test, or maintenance work without a new capability.
+
+Run one of these commands before committing and pushing:
+
+```sh
+pnpm version:bump major
+pnpm version:bump update
+pnpm version:bump fix
+```
+
+The command updates both version files. The `Version policy` GitHub workflow verifies the transition on every push and rejects unchanged, skipped, malformed, or mismatched versions. `v1.00.0` is the initial versioned baseline.
 
 ## Disclaimer & intended use
 

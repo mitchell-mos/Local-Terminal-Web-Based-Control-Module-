@@ -87,6 +87,12 @@ export function classifyTransition(previousValue, currentValue) {
   );
 }
 
+export function classifyPush(previousValue, currentValue) {
+  validateVersion(currentValue);
+  if (previousValue === null) return "baseline";
+  return classifyTransition(previousValue, currentValue);
+}
+
 async function readJson(path) {
   return JSON.parse(await readFile(path, "utf8"));
 }
@@ -132,14 +138,11 @@ async function check(ref) {
   if (!ref) throw new Error("Provide the Git ref from before this push.");
   const { version } = await currentVersion();
   const previous = await previousVersion(ref);
-  if (previous === null) {
-    if (formatVersion(version) !== "v1.00.0") {
-      throw new Error("The first versioned push must establish v1.00.0.");
-    }
-    process.stdout.write("Version policy established at v1.00.0.\n");
+  const level = classifyPush(previous, version);
+  if (level === "baseline") {
+    process.stdout.write(`Version policy established at ${formatVersion(version)}.\n`);
     return;
   }
-  const level = classifyTransition(previous, version);
   process.stdout.write(`${formatVersion(previous)} → ${formatVersion(version)} (${level})\n`);
 }
 

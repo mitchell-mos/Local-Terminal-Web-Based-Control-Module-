@@ -2484,8 +2484,8 @@ textarea:focus-visible {
 }
 
 .restart-icon {
-  width: 14px;
-  height: 14px;
+  width: 15px;
+  height: 15px;
   -webkit-mask-image: url("/icons/restart-loader.svg");
   mask-image: url("/icons/restart-loader.svg");
 }

@@ -91,7 +91,7 @@ test("does not ship private user data or unrelated runtime state", async () => {
   assert.match(page, /Open website/);
   assert.doesNotMatch(page, />\s*Deny\s*</);
   assert.doesNotMatch(page, />\s*Accept\s*</);
-  assert.match(restartIcon, /M21 3v5h-5/);
+  assert.match(restartIcon, /M12 5V1L7 6l5 5V7/);
   assert.match(proxy, /runtime", "session-token/);
   assert.match(proxy, /"X-Control-Token": token/);
   assert.match(proxy, /sec-fetch-site/);

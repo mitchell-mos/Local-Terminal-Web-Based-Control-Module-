@@ -4,6 +4,7 @@ import importlib.util
 import http.client
 import json
 import os
+import plistlib
 import socket
 import stat
 import subprocess
@@ -42,6 +43,7 @@ class ControlServerTests(unittest.TestCase):
         control_server.PROCESS_ERRORS.clear()
         control_server.PROCESS_STOP_REASONS.clear()
         control_server.HEALTHY_PROJECTS.clear()
+        control_server.LAST_ACTIONS.clear()
 
     def tearDown(self) -> None:
         control_server.stop_all_processes()
@@ -77,6 +79,30 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(control_server.SESSION_TOKEN_FILE.read_text().strip(), second)
         self.assertEqual(private_mode(control_server.SESSION_TOKEN_FILE), 0o600)
 
+    def test_instances_receive_distinct_session_tokens(self) -> None:
+        first = control_server.rotate_session_token()
+        second_runtime = self.root / "second-instance" / "runtime"
+        control_server.RUNTIME_DIR = second_runtime
+        control_server.SESSION_TOKEN_FILE = second_runtime / "session-token"
+        control_server.SESSION_TOKEN = ""
+        second = control_server.rotate_session_token()
+        self.assertNotEqual(first, second)
+        self.assertEqual(control_server.SESSION_TOKEN_FILE.read_text().strip(), second)
+
+    def test_runner_port_configuration_is_validated(self) -> None:
+        previous = os.environ.get("CONTROL_MODULE_RUNNER_PORT")
+        try:
+            os.environ["CONTROL_MODULE_RUNNER_PORT"] = "10425"
+            self.assertEqual(control_server.configured_runner_port(), 10425)
+            for invalid in ("not-a-port", "1024", "65536"):
+                os.environ["CONTROL_MODULE_RUNNER_PORT"] = invalid
+                self.assertEqual(control_server.configured_runner_port(), 10001)
+        finally:
+            if previous is None:
+                os.environ.pop("CONTROL_MODULE_RUNNER_PORT", None)
+            else:
+                os.environ["CONTROL_MODULE_RUNNER_PORT"] = previous
+
     def test_project_environment_does_not_inherit_secrets(self) -> None:
         previous = os.environ.get("CONTROL_MODULE_TEST_SECRET")
         os.environ["CONTROL_MODULE_TEST_SECRET"] = "do-not-copy"
@@ -96,14 +122,59 @@ class ControlServerTests(unittest.TestCase):
         try:
             os.environ["CONTROL_MODULE_WEB_PORT"] = "14325"
             self.assertEqual(control_server.configured_web_port(), 14325)
-            for invalid in ("not-a-port", "1024", "10001", "65536"):
+            for invalid in ("not-a-port", "1024", "65536"):
                 os.environ["CONTROL_MODULE_WEB_PORT"] = invalid
                 self.assertEqual(control_server.configured_web_port(), 1025)
+
+            os.environ["CONTROL_MODULE_WEB_PORT"] = str(control_server.PORT)
+            self.assertEqual(control_server.configured_web_port(), 1025)
         finally:
             if previous is None:
                 os.environ.pop("CONTROL_MODULE_WEB_PORT", None)
             else:
                 os.environ["CONTROL_MODULE_WEB_PORT"] = previous
+
+    def test_native_apps_are_verified_for_the_current_instance(self) -> None:
+        source = self.root / "Control Module"
+        settings = self.root / "settings"
+        setup_app = source / "Setup.app" / "Contents"
+        source.mkdir(parents=True)
+        settings.mkdir(parents=True)
+        setup_app.mkdir(parents=True)
+        instance_id = "12345678-1234-4123-8123-123456789abc"
+        (source / "package.json").write_text('{"name":"control-module"}\n', encoding="utf-8")
+        (source / ".control-module-instance").write_text(f"{instance_id}\n", encoding="utf-8")
+        (settings / "instance-id").write_text(f"{instance_id}\n", encoding="utf-8")
+        (settings / "desktop-access").write_text("private\n", encoding="utf-8")
+        (settings / "install-path").write_text(f"{source / 'Control Module.app'}\n", encoding="utf-8")
+        (setup_app / "Info.plist").write_bytes(plistlib.dumps({
+            "CFBundleIdentifier": "io.github.mitchell-mos.control-module.setup",
+        }))
+
+        environment = {
+            "CONTROL_MODULE_INSTANCE_ID": instance_id,
+            "CONTROL_MODULE_SOURCE_DIR": str(source),
+            "CONTROL_MODULE_CONFIG_DIR": str(settings),
+        }
+        previous = {key: os.environ.get(key) for key in environment}
+        try:
+            os.environ.update(environment)
+            self.assertEqual(control_server.verified_native_app_path("settings"), (source / "Setup.app").resolve())
+            view = control_server.system_settings_view()
+            self.assertEqual(view["desktopAccess"], "private")
+            self.assertEqual(view["installLocation"], "Control Module folder")
+            self.assertTrue(view["settingsAvailable"] if sys.platform == "darwin" else not view["settingsAvailable"])
+
+            (setup_app / "Info.plist").write_bytes(plistlib.dumps({
+                "CFBundleIdentifier": "example.invalid",
+            }))
+            self.assertIsNone(control_server.verified_native_app_path("settings"))
+        finally:
+            for key, value in previous.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
 
     def test_runner_rejects_unauthorized_browser_requests(self) -> None:
         try:

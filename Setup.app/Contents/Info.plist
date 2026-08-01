@@ -22,12 +22,16 @@
 	<string>APPL</string>
 	<key>CFBundleSignature</key>
 	<string>aplt</string>
+	<key>LSArchitecturePriority</key>
+	<array>
+		<string>arm64</string>
+	</array>
 	<key>LSMinimumSystemVersion</key>
 	<string>13.0</string>
-	<key>LSRequiresCarbon</key>
+	<key>LSRequiresNativeExecution</key>
 	<true/>
 	<key>NSDesktopFolderUsageDescription</key>
-	<string>Setup needs access to the source folder you select so it can create and configure the local app.</string>
+	<string>Setup reads only its verified Control Module download so you can choose whether the installed app uses Desktop.</string>
 	<key>OSAAppletShowStartupScreen</key>
 	<false/>
 </dict>

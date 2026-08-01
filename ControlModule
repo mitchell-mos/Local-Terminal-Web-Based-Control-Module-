@@ -4,18 +4,53 @@ set -u
 umask 077
 
 SELF_DIR="${0:A:h}"
-USER_CONFIG_DIR="${CONTROL_MODULE_CONFIG_DIR:-$HOME/Library/Application Support/Control Module}"
+CONFIG_ROOT="${CONTROL_MODULE_CONFIG_ROOT:-$HOME/Library/Application Support/Control Module}"
+INSTANCE_ID="${CONTROL_MODULE_INSTANCE_ID:-}"
+INSTANCE_MARKER_PRESENT=0
+INSTANCE_ID_INVALID=0
+if [[ -n "$INSTANCE_ID" ]]; then
+  INSTANCE_MARKER_PRESENT=1
+elif [[ -e "$SELF_DIR/.control-module-instance" ]]; then
+  INSTANCE_MARKER_PRESENT=1
+  [[ -r "$SELF_DIR/.control-module-instance" ]] && IFS= read -r INSTANCE_ID < "$SELF_DIR/.control-module-instance" || true
+elif [[ "${SELF_DIR:t}" == "Resources" && "${SELF_DIR:h:t}" == "Contents" && -e "$SELF_DIR/instance-id" ]]; then
+  INSTANCE_MARKER_PRESENT=1
+  [[ -r "$SELF_DIR/instance-id" ]] && IFS= read -r INSTANCE_ID < "$SELF_DIR/instance-id" || true
+fi
+if (( INSTANCE_MARKER_PRESENT )) \
+  && ! print -r -- "$INSTANCE_ID" | /usr/bin/grep -Eq '^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$'; then
+  INSTANCE_ID_INVALID=1
+  INSTANCE_ID=""
+fi
+if [[ -n "${CONTROL_MODULE_CONFIG_DIR:-}" ]]; then
+  USER_CONFIG_DIR="${CONTROL_MODULE_CONFIG_DIR:A}"
+elif [[ -n "$INSTANCE_ID" ]]; then
+  USER_CONFIG_DIR="$CONFIG_ROOT/instances/$INSTANCE_ID"
+else
+  USER_CONFIG_DIR="$CONFIG_ROOT"
+fi
 PROJECT_PATH_FILE="$USER_CONFIG_DIR/project-path"
+RUNTIME_PATH_FILE="$USER_CONFIG_DIR/runtime-path"
 WEB_PORT_FILE="$USER_CONFIG_DIR/web-port"
+RUNNER_PORT_FILE="$USER_CONFIG_DIR/runner-port"
 BUNDLED_PROJECT_DIR="$SELF_DIR/../Resources/control-module"
+CONTAINING_PROJECT_DIR="${SELF_DIR:h:h:h}"
 CONFIGURED_PROJECT_DIR=""
+CONFIGURED_RUNTIME_DIR=""
 WEB_PORT="1025"
+RUNNER_PORT="10001"
 
 if [[ -r "$PROJECT_PATH_FILE" ]]; then
   IFS= read -r CONFIGURED_PROJECT_DIR < "$PROJECT_PATH_FILE" || true
 fi
+if [[ -r "$RUNTIME_PATH_FILE" ]]; then
+  IFS= read -r CONFIGURED_RUNTIME_DIR < "$RUNTIME_PATH_FILE" || true
+fi
 if [[ -r "$WEB_PORT_FILE" ]]; then
   IFS= read -r WEB_PORT < "$WEB_PORT_FILE" || true
+fi
+if [[ -r "$RUNNER_PORT_FILE" ]]; then
+  IFS= read -r RUNNER_PORT < "$RUNNER_PORT_FILE" || true
 fi
 
 if [[ -n "${CONTROL_MODULE_DIR:-}" ]]; then
@@ -24,6 +59,10 @@ elif [[ -f "$SELF_DIR/package.json" ]]; then
   PROJECT_DIR="$SELF_DIR"
 elif [[ -f "$BUNDLED_PROJECT_DIR/package.json" ]]; then
   PROJECT_DIR="${BUNDLED_PROJECT_DIR:A}"
+elif [[ -n "$CONFIGURED_RUNTIME_DIR" && -f "$CONFIGURED_RUNTIME_DIR/package.json" ]]; then
+  PROJECT_DIR="${CONFIGURED_RUNTIME_DIR:A}"
+elif [[ -f "$CONTAINING_PROJECT_DIR/package.json" ]]; then
+  PROJECT_DIR="$CONTAINING_PROJECT_DIR"
 elif [[ -n "$CONFIGURED_PROJECT_DIR" && -f "$CONFIGURED_PROJECT_DIR/package.json" ]]; then
   PROJECT_DIR="${CONFIGURED_PROJECT_DIR:A}"
 else
@@ -31,7 +70,7 @@ else
 fi
 
 WEB_URL="http://127.0.0.1:$WEB_PORT/"
-RUNNER_URL="http://127.0.0.1:10001/health"
+RUNNER_URL="http://127.0.0.1:$RUNNER_PORT/health"
 USER_DATA_DIR="${CONTROL_MODULE_DATA_DIR:-$USER_CONFIG_DIR/data}"
 PROJECT_DATA_FILE="$USER_DATA_DIR/projects.json"
 PROJECT_LOG_DIR="$USER_DATA_DIR/logs/projects"
@@ -44,7 +83,7 @@ SERVER_FILE="$PROJECT_DIR/server/control_server.py"
 WEB_PID=""
 RUNNER_PID=""
 BUNDLED_NODE="$SELF_DIR/../Resources/runtime/bin/node"
-BASE_PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+BASE_PATH="/opt/homebrew/bin:/usr/local/bin:/Library/Frameworks/Python.framework/Versions/Current/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
 if [[ -x "$BUNDLED_NODE" ]]; then
   NODE="$BUNDLED_NODE"
@@ -62,6 +101,21 @@ show_error() {
     print -u2 -- "Control Module could not start: $1"
   fi
 }
+
+if (( $# > 0 )); then
+  show_error "The launcher received an unsupported request."
+  exit 1
+fi
+
+if (( INSTANCE_ID_INVALID )); then
+  show_error "This app's private installation marker is missing or invalid. Run Setup again from its Control Module folder."
+  exit 1
+fi
+
+if [[ "$(/usr/bin/uname -m)" != "arm64" ]]; then
+  show_error "Control Module requires an Apple silicon Mac. Intel Macs and Rosetta translation are not supported."
+  exit 1
+fi
 
 confirm_setup() {
   if [[ "$(uname -s)" != "Darwin" ]]; then
@@ -82,6 +136,44 @@ web_ready() {
   /usr/bin/curl -fsS "$WEB_URL" 2>/dev/null | /usr/bin/grep -q "Control Module"
 }
 
+web_assets_ready() {
+  local page_html bootstrap_asset
+  page_html="$(/usr/bin/curl -fsS "$WEB_URL" 2>/dev/null || true)"
+  print -r -- "$page_html" | /usr/bin/grep -q "Control Module" || return 1
+  bootstrap_asset="$(print -r -- "$page_html" \
+    | /usr/bin/grep -oE '/assets/index-[A-Za-z0-9_-]+\.js' \
+    | /usr/bin/head -1 || true)"
+  [[ -n "$bootstrap_asset" ]] || return 1
+  /usr/bin/curl -fsS -o /dev/null "${WEB_URL%/}${bootstrap_asset}" 2>/dev/null
+}
+
+dashboard_listener_pid() {
+  /usr/sbin/lsof -tiTCP:"$WEB_PORT" -sTCP:LISTEN 2>/dev/null | /usr/bin/head -1 || true
+}
+
+process_is_owned_dashboard() {
+  local process_id="$1"
+  local process_cwd process_command
+  process_cwd="$(/usr/sbin/lsof -a -p "$process_id" -d cwd -Fn 2>/dev/null \
+    | /usr/bin/sed -n 's/^n//p' | /usr/bin/head -1 || true)"
+  [[ -n "$process_cwd" && "${process_cwd:A}" == "${PROJECT_DIR:A}" ]] || return 1
+  process_command="$(/bin/ps -ww -p "$process_id" -o command= 2>/dev/null || true)"
+  [[ "$process_command" == *"node_modules/vinext/dist/cli.js"* && "$process_command" == *" start "* ]]
+}
+
+stop_broken_owned_dashboard() {
+  local process_id attempt
+  process_id="$(dashboard_listener_pid)"
+  [[ -n "$process_id" ]] || return 0
+  process_is_owned_dashboard "$process_id" || return 1
+  /bin/kill -TERM "$process_id" 2>/dev/null || return 1
+  for attempt in {1..60}; do
+    /bin/kill -0 "$process_id" 2>/dev/null || return 0
+    /bin/sleep 0.1
+  done
+  return 1
+}
+
 runner_ready() {
   local token
   token="$(session_token)"
@@ -90,10 +182,7 @@ runner_ready() {
 }
 
 open_control_module() {
-  local token url
-  token="$(session_token)"
-  [[ -n "$token" ]] || return 1
-  url="${WEB_URL}#token=${token}"
+  local url="${WEB_URL}"
   if [[ "${CONTROL_MODULE_NO_OPEN:-0}" == "1" ]]; then
     return 0
   fi
@@ -152,8 +241,25 @@ if [[ ! -d "$PROJECT_DIR" || ! -f "$PROJECT_DIR/package.json" ]]; then
   exit 1
 fi
 
-if [[ "$WEB_PORT" != <-> ]] || (( WEB_PORT < 1025 || WEB_PORT > 65535 || WEB_PORT == 10001 )); then
-  show_error "The configured dashboard port is invalid. Run Setup again and choose 1025–65535, excluding 10001."
+if [[ -n "$INSTANCE_ID" && -r "$PROJECT_PATH_FILE" ]]; then
+  expected_project_dir=""
+  if [[ -r "$RUNTIME_PATH_FILE" ]]; then
+    IFS= read -r expected_project_dir < "$RUNTIME_PATH_FILE" || true
+  else
+    IFS= read -r expected_project_dir < "$PROJECT_PATH_FILE" || true
+  fi
+  if [[ -n "$expected_project_dir" && "${expected_project_dir:A}" != "${PROJECT_DIR:A}" ]]; then
+    show_error "This folder is a copy of another Control Module installation. Run Setup in this folder to give it a new private marker."
+    exit 1
+  fi
+fi
+
+if [[ "$WEB_PORT" != <-> ]] || (( WEB_PORT < 1025 || WEB_PORT > 65535 )); then
+  show_error "The configured dashboard port is invalid. Run Setup again and choose 1025–65535."
+  exit 1
+fi
+if [[ "$RUNNER_PORT" != <-> ]] || (( RUNNER_PORT < 1025 || RUNNER_PORT > 65535 || RUNNER_PORT == WEB_PORT )); then
+  show_error "The private runner port for this installation is invalid. Run Setup again."
   exit 1
 fi
 
@@ -163,17 +269,46 @@ if [[ ! -f "$SERVER_FILE" ]]; then
 fi
 
 if ! prepare_private_data; then
-  show_error "Existing private data could not be moved safely. Check access to the selected source folder, then rerun setup. Nothing was overwritten."
+  show_error "Existing private data could not be moved safely. Check access to the verified Control Module folder, then rerun setup. Nothing was overwritten."
   exit 1
 fi
 export CONTROL_MODULE_DATA_DIR="$USER_DATA_DIR"
+export CONTROL_MODULE_CONFIG_DIR="$USER_CONFIG_DIR"
+export CONTROL_MODULE_SOURCE_DIR="$CONFIGURED_PROJECT_DIR"
+export CONTROL_MODULE_INSTANCE_ID="$INSTANCE_ID"
 export CONTROL_MODULE_WEB_PORT="$WEB_PORT"
+export CONTROL_MODULE_RUNNER_PORT="$RUNNER_PORT"
+
+find_supported_python() {
+  local candidate
+  typeset -a candidates
+  candidates=(
+    "${CONTROL_MODULE_PYTHON:-}"
+    "$(command -v python3 || true)"
+    "/Library/Frameworks/Python.framework/Versions/Current/bin/python3"
+    "/opt/homebrew/bin/python3"
+    "/usr/local/bin/python3"
+    "/usr/bin/python3"
+  )
+  for candidate in "${candidates[@]}"; do
+    if [[ -x "$candidate" ]] \
+      && "$candidate" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)' >/dev/null 2>&1; then
+      print -r -- "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
 
 PNPM="$(command -v pnpm || true)"
 COREPACK="$(command -v corepack || true)"
-PYTHON="$(command -v python3 || true)"
-if [[ -z "$NODE" || -z "$PYTHON" ]]; then
-  show_error "Install Node.js 22 or newer and Python 3, then reopen Control Module. No Codex, ChatGPT, or LLM is required."
+PYTHON="$(find_supported_python || true)"
+if [[ -z "$NODE" ]]; then
+  show_error "The bundled Node.js runtime is missing. Run Setup again while connected to the internet. No Codex, ChatGPT, or LLM is required."
+  exit 1
+fi
+if [[ -z "$PYTHON" ]]; then
+  show_error "Install Python 3.11 or newer, then reopen Control Module. No Codex, ChatGPT, or LLM is required."
   exit 1
 fi
 
@@ -227,18 +362,20 @@ for private_file in "$WEB_LOG" "$RUNNER_LOG" "$PROJECT_DATA_FILE"; do
   [[ -f "$private_file" ]] && /bin/chmod 600 "$private_file"
 done
 
-if web_ready && runner_ready; then
+if web_assets_ready && runner_ready; then
   open_control_module
   exit 0
 fi
 
-if ! web_ready && /usr/sbin/lsof -nP -iTCP:"$WEB_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
-  show_error "Port $WEB_PORT is already being used by another program. Run Setup and choose another port."
-  exit 1
+if ! web_assets_ready && /usr/sbin/lsof -nP -iTCP:"$WEB_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+  if ! stop_broken_owned_dashboard; then
+    show_error "Port $WEB_PORT belongs to another program or a dashboard that could not stop safely. It was left unchanged."
+    exit 1
+  fi
 fi
 
-if ! runner_ready && /usr/sbin/lsof -nP -iTCP:10001 -sTCP:LISTEN >/dev/null 2>&1; then
-  show_error "Port 10001 is already being used by another program."
+if ! runner_ready && /usr/sbin/lsof -nP -iTCP:"$RUNNER_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+  show_error "This installation's private runner port $RUNNER_PORT is already being used by another program. Run Setup again."
   exit 1
 fi
 
@@ -253,7 +390,7 @@ if ! web_ready; then
 fi
 
 for attempt in {1..80}; do
-  if web_ready && runner_ready; then
+  if web_assets_ready && runner_ready; then
     open_control_module
     if [[ -n "$WEB_PID" ]]; then
       wait "$WEB_PID"

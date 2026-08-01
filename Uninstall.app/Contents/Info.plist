@@ -22,12 +22,16 @@
 	<string>APPL</string>
 	<key>CFBundleSignature</key>
 	<string>aplt</string>
+	<key>LSArchitecturePriority</key>
+	<array>
+		<string>arm64</string>
+	</array>
 	<key>LSMinimumSystemVersion</key>
 	<string>13.0</string>
-	<key>LSRequiresCarbon</key>
+	<key>LSRequiresNativeExecution</key>
 	<true/>
 	<key>NSDesktopFolderUsageDescription</key>
-	<string>Uninstall needs access to the Control Module source folder selected by the user.</string>
+	<string>Uninstall moves only the verified Control Module folder containing this app to Trash.</string>
 	<key>OSAAppletShowStartupScreen</key>
 	<false/>
 </dict>

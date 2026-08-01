@@ -6,13 +6,14 @@ Control Module does **not** require Codex, ChatGPT, OpenAI, or any other AI/LLM 
 
 ## Requirements
 
+- Apple silicon Mac (M1 or newer); Intel Macs and Rosetta are not supported
 - macOS 13 or newer
 - Node.js 22.13 or newer
 - pnpm 10 or newer (`corepack enable pnpm` can install it with supported Node.js distributions)
 - Python 3.11 or newer
 - `lsof`, `ioreg`, and `zsh`, which are included with macOS
 
-A packaged `Control Module.app` can include the standard open-source Node.js runtime. In that case, double-clicking the app does not require a system Node.js or pnpm installation. Source checkouts still use the requirements above to install dependencies and create a build.
+Setup downloads the official ARM64 Node.js runtime directly from nodejs.org when it is not already cached, verifies its pinned SHA-256 checksum, and includes the complete runtime in `Control Module.app`. Double-clicking the installed app therefore does not require a system Node.js or pnpm installation. Python 3.11 or newer is still required for the local command runner. No runtime is obtained from Codex, ChatGPT, or another LLM.
 
 ## Install and run
 
@@ -21,15 +22,28 @@ A packaged `Control Module.app` can include the standard open-source Node.js run
 After downloading or cloning the project, double-click `Setup.app`. It uses native macOS prompts without opening Terminal and lets you:
 
 - choose the dashboard port, with `1025` as the recommended default;
-- install the launcher in your personal Applications folder or on the Desktop;
-- optionally create a Desktop shortcut;
+- choose whether normal launches keep Desktop private or use the live Desktop checkout;
+- install the real launcher in the Control Module folder or your personal Applications folder;
+- optionally create a Desktop shortcut for Control Module;
 - optionally open Control Module as soon as setup finishes.
 
-The setup records the selected source folder, installation path, and dashboard port in `~/Library/Application Support/Control Module/` with permissions limited to your account. These local records are outside the repository, so personal filesystem paths are not committed or published. Rerun Setup after moving the source folder or whenever you want to change the dashboard port. The native apps use the same gear artwork as the web interface.
+Setup automatically verifies the Control Module checkout that contains it; it never asks you to select arbitrary files or folders in Finder. The default **Keep Desktop private** source mode runs a private working copy from the installation's Application Support directory, regardless of where the launcher itself is installed. Opening Control Module then does not read its Desktop checkout. **Allow access** runs directly from the downloaded folder and lets macOS present its standard Desktop authorization prompt. Source mode does not grant or revoke an existing macOS Files & Folders permission; review that separately in System Settings → Privacy & Security → Files & Folders. Rerun Setup whenever you want to change this mode or the dashboard port. A saved project command that explicitly targets Desktop may still cause macOS to ask when that project starts, regardless of the launch mode.
 
-After a successful installation, Setup moves itself from the root or Desktop into `support/Setup.app`. It stays visible after cancellation or an error so you can try again. To change the port or reinstall later, open the stored copy in `support/`.
+Setup records the verified checkout, private runtime path, access mode, installation path, and ports under `~/Library/Application Support/Control Module/` with permissions limited to your account. These local records are outside the repository, so personal filesystem paths are not committed or published. If you move the checkout, move Setup with it and run Setup again. The native apps use the same gear artwork as the web interface.
 
-The generated app is ad-hoc signed for local use. Public downloadable releases should be signed and notarized with an Apple Developer ID before distribution; otherwise macOS may show an unidentified-developer warning.
+Setup keeps one real `Setup.app` in the Control Module folder and does not place Setup on the Desktop. If the Desktop shortcut is selected, it links only to the real Control Module app rather than creating a duplicate app bundle. To change the port or reinstall later, open `Setup.app` from the Control Module folder.
+
+The dashboard's **Settings** button shows the current port, source mode, shortcut state, install location, and appearance. Opening native settings requires a confirmation before the authenticated loopback runner launches the verified `Setup.app` belonging to the same installation. Uninstall uses a separate warning, opens only the verified `Uninstall.app`, and then relies on that native app's second confirmation before anything is moved to Trash. The browser API never grants macOS permissions, edits installation settings directly, or deletes files.
+
+When you change the install location, Setup verifies the previous launcher's internal installation marker, installs and records the replacement first, updates its shortcut, and then moves only that superseded launcher to Trash. Other Control Module installations and unrelated apps are untouched.
+
+On first setup, each downloaded Control Module folder receives a random, non-secret internal installation marker. The same marker is recorded in the folder, installed app bundle, and private settings directory. Setup detects a Finder copy carrying another folder's marker and assigns the copy a new one. Source files are not individually modified or stamped with a secret; folder membership plus matching ownership markers provides the uninstall boundary without corrupting project files or exposing the private runner token.
+
+Each installation receives its own settings, saved projects, logs, rotating private runner token, dashboard port, and automatically selected private runner port. Multiple copies can therefore run at the same time when their dashboard ports differ. If the standard Applications or Desktop app name is already owned by another installation, Setup adds a short marker to the app name instead of overwriting it.
+
+Bookmarks and dashboard URLs contain only the loopback address, such as `http://127.0.0.1:1025/`. The internal installation marker, private runner port, and authorization token are not shown or saved in the browser. Any browser on the same Mac can open that address without a separate authorization prompt while Control Module is running. The dashboard validates the local request and forwards it to the private runner with the rotating token on the server side. If the dashboard is not running, open `Control Module.app` first.
+
+The generated apps contain ARM64-only launch executables, require native execution, and use the ARM64 Node.js runtime when one is bundled. The generated app is ad-hoc signed for local use. Public downloadable releases should be signed and notarized with an Apple Developer ID before distribution; otherwise macOS may show an unidentified-developer warning.
 
 Maintainers can regenerate the native icon from `public/gear.svg` with `support/mac/icon.sh` and rebuild the native setup app with `support/mac/setup.sh`.
 
@@ -46,19 +60,13 @@ chmod +x ControlModule
 
 ### Uninstall
 
-Double-click `Uninstall.app`. Its trash-can icon distinguishes this destructive action from Setup and the main app. The native uninstaller:
+Double-click the `Uninstall.app` inside the Control Module folder you want to remove. Its trash-can icon distinguishes this destructive action from Setup and the main app. It presents one confirmation with clear No and Yes choices. Choosing Yes moves only that verified Control Module folder to Trash. If that exact folder is the configured running copy, its local services and managed projects are stopped safely first.
 
-- safely stops Control Module and every project process it currently manages;
-- removes verified Control Module apps, Setup copies, and Desktop shortcuts;
-- clears its browser storage for both local hostnames without touching unrelated browser data;
-- permanently removes its saved commands, preferences, logs, tokens, and backups from Application Support;
-- optionally moves the complete source checkout to the macOS Trash after a separate confirmation.
+Other downloaded Control Module folders, apps in Applications, Desktop shortcuts, browser storage, shared settings, saved commands, logs, tokens, backups, external project folders, and databases are left unchanged. This narrow behavior prevents one downloaded copy from uninstalling another. A shortcut that pointed into the removed folder may become broken and can be deleted manually. Empty the Trash later to erase the removed folder permanently.
 
-The uninstaller never deletes the external project folders or databases referenced by saved commands. If the source checkout is moved to Trash, empty the Trash later to erase that copy permanently.
+Maintainers can preview the exact native-app uninstall without changing anything by running `support/mac/uninstall.sh --source "$PWD" --remove-source --dry-run`.
 
-Maintainers can preview the exact uninstall targets without changing anything by running `support/mac/uninstall.sh --source "$PWD" --dry-run`.
-
-The launcher starts the dashboard at the port selected during Setup and the private command runner at `http://127.0.0.1:10001`. Both services bind only to the loopback interface. On first graphical launch, Control Module can ask permission to install packages and build the dashboard for you.
+The launcher starts the dashboard at the port selected during Setup and an automatically assigned private command-runner port. Both services bind only to the loopback interface. On first graphical launch, Control Module can ask permission to install packages and build the dashboard for you.
 
 No AI software is involved. A packaged app prefers its bundled standard Node.js runtime; a source checkout uses ordinary `node`, `pnpm`, and `python3` installations on the user's system.
 
@@ -72,11 +80,10 @@ No AI software is involved. A packaged app prefers its bundled standard Node.js 
 | `public/` | Local interface icons and static assets |
 | `support/docs/` | Runtime and third-party notes |
 | `support/mac/` | Native app assets and tools |
-| `support/Setup.app` | Setup after a successful installation |
 | `support/tests/` | JavaScript and Python tests |
 | `.github/` | GitHub guides and workflows |
 | `ControlModule` | Source and packaged-app launcher |
-| `Setup.app` | Initial guided setup; files itself under `support/` when finished |
+| `Setup.app` | Guided setup; remains the single real Setup app in the project folder |
 | `Uninstall.app` | Native guided removal |
 
 The root keeps only launch/runtime source and files that GitHub, Node.js, pnpm, TypeScript, or Vite require at standard paths. Auxiliary files live under `support/` with short names.
@@ -95,19 +102,24 @@ Control Module does not scan arbitrary files, upload data, contact an AI service
 
 ## Private local data
 
-Normal launches keep private state outside the repository under `~/Library/Application Support/Control Module/`:
+Normal launches keep private state outside the repository under `~/Library/Application Support/Control Module/instances/<instance-id>/`. The UUID is an internal installation marker used for ownership checks, not an authentication secret or a value users need to manage.
 
 | Path | Contents | Permissions |
 |---|---|---|
-| `project-path` | Location selected by the local installer | `0600` |
-| `install-path` | Location of the locally installed app | `0600` |
+| `.control-module-instance` in the downloaded folder | Non-secret internal installation marker; ignored by Git | `0600` |
+| `instance-id` | Matching ownership UUID | `0600` |
+| `project-path` | Verified checkout belonging to this installation | `0600` |
+| `runtime-path` | Live checkout or private working copy selected in Setup | `0600` |
+| `desktop-access` | Saved `private` or `desktop` launch mode | `0600` |
+| `install-path` | Installed app carrying the same internal marker | `0600` |
 | `web-port` | Dashboard port selected during Setup | `0600` |
-| `data/projects.json` | Project names, ports, and commands | `0600` |
-| `data/logs/projects/` | Per-project command output with rotation | directory `0700`, files `0600` |
-| `data/runtime/session-token` | Random token authorizing this browser session; rotated when the runner starts | `0600` |
-| `data/logs/dashboard.log` | Local dashboard startup output | `0600` |
-| `data/logs/runner.log` | Local runner diagnostics | `0600` |
-| `data/backups/` | Private safety copies of unreadable or older project data | directory `0700`, files `0600` |
+| `runner-port` | Private runner port assigned to this installation | `0600` |
+| `data/projects.json` | Project names, ports, and commands for this installation | `0600` |
+| `data/logs/projects/` | Project output for this installation, with rotation | directory `0700`, files `0600` |
+| `data/runtime/session-token` | Random server-side runner secret rotated when the runner starts | `0600` |
+| `data/logs/dashboard.log` | Dashboard startup output for this installation | `0600` |
+| `data/logs/runner.log` | Runner diagnostics for this installation | `0600` |
+| `data/backups/` | Private safety copies for this installation | directory `0700`, files `0600` |
 
 Commands themselves are not copied into the per-project output logs. Logs rotate at 2 MiB and retain up to three prior files. The launcher safely migrates data from older root-level locations on first run. Delete `~/Library/Application Support/Control Module/` while Control Module is stopped to remove all saved local settings and data.
 
@@ -124,7 +136,7 @@ Never commit runtime JSON, logs, `.env` files, tokens, or project-specific files
 ## Security model
 
 - The dashboard and runner are loopback-only and are not intended to accept LAN or internet traffic.
-- The runner requires an exact local Origin, Host validation, and a random token that is rotated when the runner starts. The launcher passes it in a URL fragment, which is not sent in HTTP requests, and the page immediately moves it to tab-only session storage.
+- The browser sends API requests only to the dashboard's own loopback origin. The dashboard rejects invalid hosts, origins, and cross-site browser requests, then forwards accepted calls to the private runner with a random token read from its private local data directory. The runner independently validates its exact local Origin, Host, and rotating token. The browser, page URL, bookmarks, and Web Storage never receive that token.
 - Saved commands are arbitrary shell commands. Only run commands you understand and trust.
 - Control Module is not a sandbox, container, permissions boundary, remote administration panel, or multi-user service.
 - A project command can still read or change anything the current macOS user can access. Review commands before starting them.

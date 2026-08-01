@@ -8,6 +8,7 @@ import os
 import plistlib
 import re
 import secrets
+import shlex
 import signal
 import socket
 import subprocess
@@ -22,6 +23,24 @@ from typing import Any
 HOST = "127.0.0.1"
 MIN_PROJECT_PORT = 1026
 MAX_PROJECT_PORT = 9999
+BROWSER_BLOCKED_PROJECT_PORTS = frozenset({
+    1719,
+    1720,
+    1723,
+    2049,
+    3659,
+    4045,
+    5060,
+    5061,
+    6000,
+    6566,
+    6665,
+    6666,
+    6667,
+    6668,
+    6669,
+    6697,
+})
 GRACEFUL_STOP_SECONDS = 5.0
 PROJECT_START_TIMEOUT_SECONDS = 30.0
 ACTION_RATE_LIMIT_SECONDS = 1.0
@@ -32,6 +51,13 @@ LOG_MAX_BYTES = 2 * 1024 * 1024
 LOG_BACKUP_COUNT = 3
 REQUEST_TIMEOUT_SECONDS = 10.0
 MAX_REQUEST_THREADS = 24
+MAX_REQUEST_BODY_BYTES = 16 * 1024
+MAX_PROJECT_PATH_LENGTH = 4096
+MAX_PACKAGE_JSON_BYTES = 1024 * 1024
+MAX_PROJECT_COMMAND_LENGTH = 4096
+MAX_OPTIONAL_COMMAND_LENGTH = 2048
+PROJECT_HOOK_TIMEOUT_SECONDS = 60.0
+PROJECT_STOP_HOOK_TIMEOUT_SECONDS = 10.0
 
 
 def configured_runner_port() -> int:
@@ -215,6 +241,260 @@ def open_verified_native_app(kind: str) -> None:
     )
 
 
+def choose_project_folder() -> dict[str, Any]:
+    """Open a user-controlled macOS folder picker without scanning other folders."""
+    if sys.platform != "darwin":
+        raise OSError("Folder browsing is available only on macOS. Enter the path instead.")
+    enforce_action_rate_limit(["system:choose-folder"])
+    try:
+        result = subprocess.run(
+            [
+                "/usr/bin/osascript",
+                "-e",
+                'POSIX path of (choose folder with prompt "Choose the project folder")',
+            ],
+            check=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=300,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise OSError("The folder picker timed out. Enter the folder path instead.") from error
+    if result.returncode != 0:
+        if "-128" in result.stderr or "User canceled" in result.stderr:
+            return {"cancelled": True}
+        raise OSError("The macOS folder picker could not open. Enter the folder path instead.")
+    selected = result.stdout.strip()
+    if not selected:
+        return {"cancelled": True}
+    directory = validate_project_directory(selected)
+    return {"cancelled": False, "path": str(directory)}
+
+
+def validate_project_directory(raw_path: Any) -> Path:
+    candidate = str(raw_path or "").strip()
+    if not candidate:
+        raise ValueError("Choose a project folder or enter its path.")
+    if len(candidate) > MAX_PROJECT_PATH_LENGTH or "\x00" in candidate:
+        raise ValueError("The project folder path is invalid.")
+    path = Path(candidate).expanduser()
+    if not path.is_absolute():
+        raise ValueError("Enter the full project folder path, starting with /.")
+    try:
+        resolved = path.resolve(strict=True)
+    except (OSError, RuntimeError) as error:
+        raise ValueError("That project folder could not be found.") from error
+    if not resolved.is_dir():
+        raise ValueError("The selected project path is not a folder.")
+    if resolved == Path(resolved.anchor) or resolved == Path.home().resolve():
+        raise ValueError("Choose a specific project folder, not the whole Mac or home folder.")
+    return resolved
+
+
+def read_project_manifest(directory: Path) -> dict[str, Any] | None:
+    manifest_path = directory / "package.json"
+    if not manifest_path.is_file():
+        return None
+    try:
+        if manifest_path.stat().st_size > MAX_PACKAGE_JSON_BYTES:
+            raise ValueError("package.json is too large to inspect safely.")
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as error:
+        raise ValueError("package.json contains invalid JSON. Fix it or use Advanced.") from error
+    except OSError as error:
+        raise ValueError("package.json could not be read. Check its permissions or use Advanced.") from error
+    if not isinstance(manifest, dict):
+        raise ValueError("package.json must contain a JSON object. Fix it or use Advanced.")
+    return manifest
+
+
+def project_name_suggestion(directory: Path, manifest: dict[str, Any] | None) -> str:
+    package_name = str((manifest or {}).get("name", "")).strip()
+    suggestion = package_name.rsplit("/", 1)[-1] if package_name else directory.name
+    suggestion = re.sub(r"[\x00-\x1f\x7f]+", " ", suggestion).strip()
+    return suggestion[:48] or "Local project"
+
+
+def package_scripts(manifest: dict[str, Any] | None) -> dict[str, str]:
+    scripts = (manifest or {}).get("scripts", {})
+    if not isinstance(scripts, dict):
+        return {}
+    return {
+        str(name): command
+        for name, command in scripts.items()
+        if isinstance(name, str) and isinstance(command, str) and name and command.strip()
+    }
+
+
+def package_dependencies(manifest: dict[str, Any] | None) -> set[str]:
+    names: set[str] = set()
+    for section in ("dependencies", "devDependencies", "peerDependencies"):
+        dependencies = (manifest or {}).get(section, {})
+        if isinstance(dependencies, dict):
+            names.update(str(name).lower() for name in dependencies)
+    return names
+
+
+def matching_scripts(scripts: dict[str, str], pattern: re.Pattern[str]) -> list[str]:
+    matches = [name for name, command in scripts.items() if pattern.search(command)]
+    return sorted(matches, key=lambda name: (name not in {"dev", "start", "serve"}, name))
+
+
+def detect_project_kind(manifest: dict[str, Any] | None) -> tuple[str, str, list[str]]:
+    if manifest is None:
+        return "static", "Static files", []
+    scripts = package_scripts(manifest)
+    dependencies = package_dependencies(manifest)
+    next_scripts = matching_scripts(scripts, re.compile(r"(?:^|[\s/])next(?:[\s]|$)"))
+    if next_scripts:
+        return "next", "Next.js", next_scripts
+    vite_scripts = matching_scripts(scripts, re.compile(r"(?:^|[\s/])(?:vite|astro)(?:[\s]|$)"))
+    if vite_scripts:
+        label = "Astro" if "astro" in dependencies else "Vite-compatible"
+        return "vite", label, vite_scripts
+    if scripts:
+        ordered_scripts = sorted(
+            scripts,
+            key=lambda name: (name not in {"dev", "start", "serve"}, name),
+        )
+        return "package", "Package script", ordered_scripts
+    return "unknown", "Unrecognized package", []
+
+
+def detect_package_manager(directory: Path, manifest: dict[str, Any] | None = None) -> str:
+    declared = str((manifest or {}).get("packageManager", "")).strip().lower()
+    declared_name = declared.split("@", 1)[0]
+    if declared_name in {"npm", "pnpm", "yarn", "bun"}:
+        return declared_name
+    if (directory / "pnpm-lock.yaml").is_file():
+        return "pnpm"
+    if (directory / "yarn.lock").is_file():
+        return "yarn"
+    if (directory / "bun.lock").is_file() or (directory / "bun.lockb").is_file():
+        return "bun"
+    return "npm"
+
+
+def package_script_command(package_manager: str, script: str) -> str:
+    quoted_script = shlex.quote(script)
+    if package_manager == "yarn":
+        return f"corepack yarn run {quoted_script}"
+    if package_manager == "pnpm":
+        return f"corepack pnpm run {quoted_script}"
+    if package_manager == "bun":
+        return f"bun run {quoted_script}"
+    return f"npm run {quoted_script}"
+
+
+def generated_project_command(
+    directory: Path,
+    kind: str,
+    port: int,
+    script: str = "",
+    package_manager: str = "npm",
+) -> str:
+    quoted_directory = shlex.quote(str(directory))
+    if kind == "static":
+        return f"cd -- {quoted_directory} && python3 -m http.server {port} --bind 127.0.0.1"
+    if kind == "vite":
+        return (
+            f"cd -- {quoted_directory} && {package_script_command(package_manager, script)} -- "
+            f"--host 127.0.0.1 --port {port}"
+        )
+    if kind == "next":
+        return (
+            f"cd -- {quoted_directory} && {package_script_command(package_manager, script)} -- "
+            f"--hostname 127.0.0.1 --port {port}"
+        )
+    if kind == "package":
+        return (
+            f"cd -- {quoted_directory} && PORT={port} HOST=127.0.0.1 "
+            f"{package_script_command(package_manager, script)}"
+        )
+    return ""
+
+
+def project_port_restriction_reason(port: int) -> str:
+    if not MIN_PROJECT_PORT <= port <= MAX_PROJECT_PORT:
+        return f"Port {port} is reserved by the system. Use a port from 1026 to 9999."
+    if port in BROWSER_BLOCKED_PROJECT_PORTS:
+        return f"Port {port} is blocked by browsers. Choose another port."
+    return ""
+
+
+def inspect_project(payload: dict[str, Any]) -> dict[str, Any]:
+    directory = validate_project_directory(payload.get("path"))
+    try:
+        port = int(payload.get("port", 0))
+    except (TypeError, ValueError) as error:
+        raise ValueError("Enter a valid port from 1026 to 9999.") from error
+    restriction = project_port_restriction_reason(port)
+    if restriction:
+        raise ValueError(restriction)
+
+    requested_kind = str(payload.get("kind", "auto")).strip()
+    if requested_kind not in {"auto", "static", "vite", "next", "package"}:
+        raise ValueError(
+            "Choose Auto-detect, Static files, Vite-compatible, Next.js, or Package script."
+        )
+    requested_script = str(payload.get("script", "")).strip()
+    manifest = read_project_manifest(directory)
+    package_manager = detect_package_manager(directory, manifest)
+    detected_kind, detected_label, scripts = detect_project_kind(manifest)
+    selected_kind = detected_kind if requested_kind == "auto" else requested_kind
+    selected_label = {
+        "static": "Static files",
+        "vite": detected_label if detected_kind == "vite" else "Vite-compatible",
+        "next": "Next.js",
+        "package": "Package script",
+        "unknown": "Unrecognized package",
+    }.get(selected_kind, "Unrecognized package")
+
+    available_kinds = [{"value": "static", "label": "Static files"}]
+    if detected_kind in {"vite", "next", "package"}:
+        available_kinds.insert(0, {"value": detected_kind, "label": detected_label})
+
+    selected_script = ""
+    if selected_kind in {"vite", "next", "package"}:
+        if detected_kind != selected_kind or not scripts:
+            raise ValueError(f"No compatible {selected_label} run script was found. Use Advanced instead.")
+        if requested_script and requested_script not in scripts:
+            raise ValueError("That package script is not available for this project type.")
+        selected_script = requested_script or scripts[0]
+
+    command = generated_project_command(
+        directory,
+        selected_kind,
+        port,
+        selected_script,
+        package_manager,
+    )
+    if selected_kind == "unknown":
+        message = "This package type was not recognized. Choose Static files or use Advanced."
+    elif requested_kind == "auto":
+        manager_note = f" with {package_manager}" if manifest is not None else ""
+        message = f"Detected {detected_label}{manager_note}."
+    else:
+        message = f"Using {selected_label}."
+
+    return {
+        "path": str(directory),
+        "suggestedName": project_name_suggestion(directory, manifest),
+        "detectedKind": detected_kind,
+        "detectedLabel": detected_label,
+        "selectedKind": selected_kind,
+        "selectedLabel": selected_label,
+        "availableKinds": available_kinds,
+        "scripts": scripts,
+        "selectedScript": selected_script,
+        "packageManager": package_manager if manifest is not None else "",
+        "command": command,
+        "message": message,
+    }
+
+
 def enforce_action_rate_limit(project_ids: list[str]) -> None:
     unique_ids = list(dict.fromkeys(project_ids))
     if not unique_ids:
@@ -359,11 +639,34 @@ def read_projects() -> list[dict[str, Any]]:
             ) from error
 
 
+def reorder_project_records(
+    projects: list[dict[str, Any]],
+    requested_ids: Any,
+) -> list[dict[str, Any]]:
+    if not isinstance(requested_ids, list):
+        raise ValueError("Project order must be a list of project IDs.")
+    project_ids = [str(project_id).strip() for project_id in requested_ids]
+    saved_ids = [str(project.get("id", "")).strip() for project in projects]
+    valid_ids = all(ID_PATTERN.fullmatch(project_id) for project_id in project_ids)
+    exact_membership = (
+        len(project_ids) == len(saved_ids)
+        and len(set(project_ids)) == len(project_ids)
+        and set(project_ids) == set(saved_ids)
+    )
+    if not valid_ids or not exact_membership:
+        raise ValueError("Project order must include each saved project exactly once.")
+    projects_by_id = {str(project["id"]): project for project in projects}
+    return [projects_by_id[project_id] for project_id in project_ids]
+
+
 def validate_project(payload: dict[str, Any]) -> dict[str, Any]:
     project_id = str(payload.get("id", "")).strip()
     name = str(payload.get("name", "")).strip()
     host = str(payload.get("host", "")).strip()
     command = str(payload.get("command", "")).strip()
+    setup_command = str(payload.get("setupCommand", "")).strip()
+    stop_command = str(payload.get("stopCommand", "")).strip()
+    restart_command = str(payload.get("restartCommand", "")).strip()
 
     try:
         port = int(payload.get("port", 0))
@@ -376,10 +679,26 @@ def validate_project(payload: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("Project names must be between 1 and 48 characters.")
     if host not in {"localhost", "127.0.0.1"}:
         raise ValueError("Choose localhost or 127.0.0.1.")
-    if not MIN_PROJECT_PORT <= port <= MAX_PROJECT_PORT:
-        raise ValueError("Enter a port from 1026 to 9999. Lower ports are reserved by the system.")
-    if len(command) > 4096:
-        raise ValueError("Keep the terminal command under 4,096 characters.")
+    restriction = project_port_restriction_reason(port)
+    if restriction:
+        raise ValueError(restriction)
+    if len(command) > MAX_PROJECT_COMMAND_LENGTH:
+        raise ValueError(
+            f"Keep the start command under {MAX_PROJECT_COMMAND_LENGTH:,} characters."
+        )
+    for label, optional_command in (
+        ("setup", setup_command),
+        ("stop", stop_command),
+        ("restart", restart_command),
+    ):
+        if len(optional_command) > MAX_OPTIONAL_COMMAND_LENGTH:
+            raise ValueError(
+                f"Keep the {label} command under {MAX_OPTIONAL_COMMAND_LENGTH:,} characters."
+            )
+    if command and not re.search(rf"(?<!\d){port}(?!\d)", command):
+        raise ValueError(f"The start command must include port {port}.")
+    if restart_command and not re.search(rf"(?<!\d){port}(?!\d)", restart_command):
+        raise ValueError(f"The restart command must include port {port}.")
 
     return {
         "id": project_id,
@@ -387,6 +706,9 @@ def validate_project(payload: dict[str, Any]) -> dict[str, Any]:
         "host": host,
         "port": port,
         "command": command,
+        "setupCommand": setup_command,
+        "stopCommand": stop_command,
+        "restartCommand": restart_command,
     }
 
 
@@ -520,8 +842,9 @@ def port_unavailable_reason(
     port: int,
     exclude_project_id: str | None = None,
 ) -> str:
-    if not MIN_PROJECT_PORT <= port <= MAX_PROJECT_PORT:
-        return f"Port {port} is reserved by the system. Use a port from 1026 to 9999."
+    restriction = project_port_restriction_reason(port)
+    if restriction:
+        return restriction
 
     projects = read_projects()
     conflict = next(
@@ -571,6 +894,8 @@ def find_available_port(host: str, starting_port: int, exclude_project_id: str |
         *range(MIN_PROJECT_PORT, min(max(starting_port, MIN_PROJECT_PORT), MAX_PROJECT_PORT + 1)),
     ]
     for candidate in candidates:
+        if project_port_restriction_reason(candidate):
+            continue
         if candidate in assigned_ports:
             continue
         if not port_is_open(host, candidate):
@@ -635,6 +960,55 @@ def last_log_line(project_id: str) -> str:
         return lines[-1][-320:] if lines else ""
     except OSError:
         return ""
+
+
+def run_project_hook(
+    project: dict[str, Any],
+    field: str,
+    label: str,
+    timeout: float = PROJECT_HOOK_TIMEOUT_SECONDS,
+) -> None:
+    """Run an optional user-saved lifecycle command with a bounded process group."""
+    command = str(project.get(field, "")).strip()
+    if not command:
+        return
+
+    project_id = str(project["id"])
+    log_file = open_private_log(project_id)
+    log_file.write(
+        f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] {label} command started.\n".encode()
+    )
+    log_file.flush()
+    process = subprocess.Popen(
+        ["/bin/zsh", "-c", command],
+        cwd=PROJECT_DIR,
+        env=project_environment(),
+        stdout=log_file,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+    )
+    try:
+        return_code = process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired as error:
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+            process.wait(timeout=2)
+        except (ProcessLookupError, subprocess.TimeoutExpired):
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait(timeout=2)
+        raise ValueError(f"The {label.lower()} command timed out after {int(timeout)} seconds.") from error
+    finally:
+        log_file.close()
+
+    if return_code != 0:
+        detail = last_log_line(project_id)
+        suffix = f" Last output: {detail}" if detail else ""
+        raise ValueError(
+            f"The {label.lower()} command exited with status {return_code}.{suffix}"
+        )
 
 
 def project_view(project: dict[str, Any]) -> dict[str, Any]:
@@ -821,7 +1195,7 @@ class ControlHandler(BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length", "0"))
         except ValueError as error:
             raise ValueError("The request size is invalid.") from error
-        if length < 1 or length > 8192:
+        if length < 1 or length > MAX_REQUEST_BODY_BYTES:
             raise ValueError("The request is empty or too large.")
         try:
             payload = json.loads(self.rfile.read(length))
@@ -887,6 +1261,12 @@ class ControlHandler(BaseHTTPRequestHandler):
             payload = self.read_payload()
             if self.path == "/api/ports/check":
                 self.check_port(payload)
+            elif self.path == "/api/projects/inspect":
+                self.send_json(200, inspect_project(payload))
+            elif self.path == "/api/system/choose-folder":
+                self.send_json(200, choose_project_folder())
+            elif self.path == "/api/projects/reorder":
+                self.reorder_projects(payload)
             elif self.path == "/api/projects/save":
                 self.save_project(payload)
             elif self.path == "/api/projects/delete":
@@ -956,17 +1336,26 @@ class ControlHandler(BaseHTTPRequestHandler):
                     or int(validated["port"]) != project_port(existing)
                     or str(validated["command"]).strip()
                     != str(existing.get("command", "")).strip()
+                    or str(validated["setupCommand"]).strip()
+                    != str(existing.get("setupCommand", "")).strip()
+                    or str(validated["stopCommand"]).strip()
+                    != str(existing.get("stopCommand", "")).strip()
+                    or str(validated["restartCommand"]).strip()
+                    != str(existing.get("restartCommand", "")).strip()
                 )
                 if immutable_fields_changed:
                     raise ValueError(
                         "Only the project name can be edited while it is running. "
-                        "Stop it to change the port or command."
+                        "Stop it to change the port or process commands."
                     )
                 validated = {
                     **validated,
                     "host": str(existing.get("host", validated["host"])),
                     "port": int(existing.get("port", validated["port"])),
                     "command": str(existing.get("command", validated["command"])),
+                    "setupCommand": str(existing.get("setupCommand", "")),
+                    "stopCommand": str(existing.get("stopCommand", "")),
+                    "restartCommand": str(existing.get("restartCommand", "")),
                 }
             else:
                 reason = port_unavailable_reason(
@@ -988,11 +1377,24 @@ class ControlHandler(BaseHTTPRequestHandler):
                 "createdAt": existing.get("createdAt", timestamp) if existing else timestamp,
                 "updatedAt": timestamp,
             }
-            projects = [saved, *[item for item in projects if item.get("id") != saved["id"]]]
+            if existing:
+                projects = [
+                    saved if item.get("id") == saved["id"] else item
+                    for item in projects
+                ]
+            else:
+                projects = [saved, *projects]
             write_projects(projects)
             PROCESS_ERRORS.pop(saved["id"], None)
             PROCESS_STOP_REASONS.pop(saved["id"], None)
         self.send_json(200, {"project": project_view(saved)})
+
+    def reorder_projects(self, payload: dict[str, Any]) -> None:
+        with LOCK:
+            projects = read_projects()
+            reordered = reorder_project_records(projects, payload.get("ids"))
+            write_projects(reordered)
+        self.send_json(200, {"reordered": True})
 
     def delete_project(self, payload: dict[str, Any]) -> None:
         project_id = str(payload.get("id", "")).strip()
@@ -1020,17 +1422,35 @@ class ControlHandler(BaseHTTPRequestHandler):
         _, project = self.find_project(project_id)
         host = str(project["host"])
         port = int(project["port"])
+        hook_error: ValueError | None = None
+        try:
+            run_project_hook(
+                project,
+                "stopCommand",
+                "Stop",
+                PROJECT_STOP_HOOK_TIMEOUT_SECONDS,
+            )
+        except ValueError as error:
+            hook_error = error
         stop_process(project_id)
         if not wait_for_port_to_close(host, port):
             detail = f"The old host did not release {host}:{port}, so it was not restarted."
             PROCESS_ERRORS[project_id] = detail
             raise OSError(detail)
-        self.launch_project(project_id)
+        if hook_error is not None:
+            PROCESS_ERRORS[project_id] = str(hook_error)
+            raise hook_error
+        self.launch_project(project_id, use_restart_command=True)
 
-    def launch_project(self, project_id: str) -> None:
+    def launch_project(self, project_id: str, use_restart_command: bool = False) -> None:
         with LOCK:
-            projects, project = self.find_project(project_id)
-            command = str(project.get("command", "")).strip()
+            _, project = self.find_project(project_id)
+            command_field = (
+                "restartCommand"
+                if use_restart_command and str(project.get("restartCommand", "")).strip()
+                else "command"
+            )
+            command = str(project.get(command_field, "")).strip()
             if not command:
                 raise ValueError("Add a terminal command before starting this project.")
             PROCESS_ERRORS.pop(project_id, None)
@@ -1058,9 +1478,25 @@ class ControlHandler(BaseHTTPRequestHandler):
                 PROCESS_ERRORS[project_id] = detail
                 raise ValueError(detail)
 
+        try:
+            run_project_hook(project, "setupCommand", "Setup")
+        except ValueError as error:
+            PROCESS_ERRORS[project_id] = str(error)
+            raise
+
+        with LOCK:
+            _, project = self.find_project(project_id)
+            command = str(project.get(command_field, "")).strip()
+            current_port = int(project["port"])
+            reason = port_unavailable_reason(str(project["host"]), current_port, project_id)
+            if reason:
+                detail = reason + " The setup command finished, but the project was not started."
+                PROCESS_ERRORS[project_id] = detail
+                raise ValueError(detail)
             log_file = open_private_log(project_id)
             log_file.write(
-                f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] Project command started.\n".encode()
+                f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] "
+                f"{'Restart' if command_field == 'restartCommand' else 'Start'} command started.\n".encode()
             )
             log_file.flush()
 
@@ -1101,14 +1537,47 @@ class ControlHandler(BaseHTTPRequestHandler):
         if not ID_PATTERN.fullmatch(project_id):
             raise ValueError("The project ID is invalid.")
         enforce_action_rate_limit([project_id])
-        stop_process(project_id)
         _, project = self.find_project(project_id)
+        hook_error: ValueError | None = None
+        try:
+            run_project_hook(
+                project,
+                "stopCommand",
+                "Stop",
+                PROJECT_STOP_HOOK_TIMEOUT_SECONDS,
+            )
+        except ValueError as error:
+            hook_error = error
+        stop_process(project_id)
+        if hook_error is not None:
+            PROCESS_ERRORS[project_id] = str(hook_error)
+            raise hook_error
         self.send_json(200, {"project": project_view(project)})
 
     def stop_all_projects(self) -> None:
         with LOCK:
             managed_ids = list(PROCESSES)
-            enforce_action_rate_limit([*managed_ids, "system:stop-all"])
+            projects_by_id = {
+                str(project.get("id")): project
+                for project in read_projects()
+                if str(project.get("id")) in managed_ids
+            }
+        enforce_action_rate_limit([*managed_ids, "system:stop-all"])
+        hook_errors: list[str] = []
+        for project_id in managed_ids:
+            project = projects_by_id.get(project_id)
+            if project is None:
+                continue
+            try:
+                run_project_hook(
+                    project,
+                    "stopCommand",
+                    "Stop",
+                    PROJECT_STOP_HOOK_TIMEOUT_SECONDS,
+                )
+            except ValueError as error:
+                hook_errors.append(f"{project.get('name', project_id)}: {error}")
+        with LOCK:
             stopped_ids, forced_ids, errors = stop_processes(managed_ids)
             projects = [project_view(project) for project in read_projects()]
         self.send_json(
@@ -1117,7 +1586,7 @@ class ControlHandler(BaseHTTPRequestHandler):
                 "projects": projects,
                 "stoppedIds": stopped_ids,
                 "forcedIds": forced_ids,
-                "errors": errors,
+                "errors": [*hook_errors, *errors],
             },
         )
 

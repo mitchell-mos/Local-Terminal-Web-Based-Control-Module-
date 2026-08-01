@@ -14,6 +14,7 @@ import time
 import unittest
 import threading
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -53,6 +54,37 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(control_server.read_projects(), [])
         self.assertEqual(json.loads(control_server.PROJECTS_FILE.read_text()), [])
         self.assertEqual(private_mode(control_server.PROJECTS_FILE), 0o600)
+
+    def test_project_reordering_requires_every_saved_project_once(self) -> None:
+        projects = [
+            {"id": "first-project", "name": "First"},
+            {"id": "second-project", "name": "Second"},
+            {"id": "third-project", "name": "Third"},
+        ]
+
+        reordered = control_server.reorder_project_records(
+            projects,
+            ["third-project", "first-project", "second-project"],
+        )
+        self.assertEqual(
+            [project["id"] for project in reordered],
+            ["third-project", "first-project", "second-project"],
+        )
+        self.assertIs(reordered[1], projects[0])
+
+        for invalid_order in (
+            ["first-project", "second-project"],
+            ["first-project", "first-project", "third-project"],
+            ["first-project", "second-project", "unknown-project"],
+        ):
+            with self.subTest(invalid_order=invalid_order):
+                with self.assertRaisesRegex(ValueError, "exactly once"):
+                    control_server.reorder_project_records(projects, invalid_order)
+        with self.assertRaisesRegex(ValueError, "must be a list"):
+            control_server.reorder_project_records(
+                projects,
+                "first-project,second-project,third-project",
+            )
 
     def test_corrupt_data_is_preserved_and_reported(self) -> None:
         control_server.ensure_private_directory(control_server.PROJECTS_FILE.parent)
@@ -133,6 +165,234 @@ class ControlServerTests(unittest.TestCase):
                 os.environ.pop("CONTROL_MODULE_WEB_PORT", None)
             else:
                 os.environ["CONTROL_MODULE_WEB_PORT"] = previous
+
+    def test_browser_blocked_project_ports_are_rejected_everywhere(self) -> None:
+        expected = {
+            1719, 1720, 1723, 2049, 3659, 4045, 5060, 5061,
+            6000, 6566, 6665, 6666, 6667, 6668, 6669, 6697,
+        }
+        self.assertEqual(control_server.BROWSER_BLOCKED_PROJECT_PORTS, expected)
+
+        project = self.root / "blocked-port-project"
+        project.mkdir()
+        for blocked_port in expected:
+            reason = control_server.project_port_restriction_reason(blocked_port)
+            self.assertIn("blocked by browsers", reason)
+            self.assertEqual(
+                control_server.port_unavailable_reason("127.0.0.1", blocked_port),
+                reason,
+            )
+            with self.assertRaisesRegex(ValueError, "blocked by browsers"):
+                control_server.inspect_project({
+                    "path": str(project),
+                    "port": blocked_port,
+                    "kind": "auto",
+                })
+            with self.assertRaisesRegex(ValueError, "blocked by browsers"):
+                control_server.validate_project({
+                    "id": "blocked-port-project",
+                    "name": "Blocked port project",
+                    "host": "127.0.0.1",
+                    "port": blocked_port,
+                    "command": f"python3 -m http.server {blocked_port}",
+                })
+
+    def test_available_port_suggestions_skip_browser_blocked_ports(self) -> None:
+        with mock.patch.object(control_server, "port_is_open", return_value=False):
+            self.assertEqual(
+                control_server.find_available_port("127.0.0.1", 5999),
+                6001,
+            )
+            self.assertEqual(
+                control_server.find_available_port("127.0.0.1", 6664),
+                6670,
+            )
+
+    def test_basic_static_project_generates_a_shell_safe_command(self) -> None:
+        project = self.root / "site with spaces"
+        project.mkdir()
+        (project / "index.html").write_text("<h1>Local</h1>\n", encoding="utf-8")
+
+        inspected = control_server.inspect_project({
+            "path": str(project),
+            "port": 4321,
+            "kind": "auto",
+        })
+
+        self.assertEqual(inspected["detectedKind"], "static")
+        self.assertEqual(inspected["selectedKind"], "static")
+        self.assertEqual(inspected["suggestedName"], "site with spaces")
+        self.assertEqual(
+            inspected["command"],
+            f"cd -- '{project.resolve()}' && python3 -m http.server 4321 --bind 127.0.0.1",
+        )
+
+    def test_basic_vite_project_detects_a_compatible_script(self) -> None:
+        project = self.root / "vite-project"
+        project.mkdir()
+        (project / "package.json").write_text(json.dumps({
+            "name": "example-vite-site",
+            "scripts": {"preview": "vite preview", "dev": "vite"},
+            "devDependencies": {"vite": "latest"},
+        }), encoding="utf-8")
+
+        inspected = control_server.inspect_project({
+            "path": str(project),
+            "port": 4322,
+            "kind": "auto",
+        })
+
+        self.assertEqual(inspected["detectedKind"], "vite")
+        self.assertEqual(inspected["selectedScript"], "dev")
+        self.assertEqual(inspected["scripts"], ["dev", "preview"])
+        self.assertEqual(
+            inspected["command"],
+            f"cd -- {project.resolve()} && npm run dev -- --host 127.0.0.1 --port 4322",
+        )
+
+    def test_basic_next_project_uses_next_hostname_flag(self) -> None:
+        project = self.root / "next-project"
+        project.mkdir()
+        (project / "package.json").write_text(json.dumps({
+            "name": "example-next-site",
+            "scripts": {"dev": "next dev"},
+            "dependencies": {"next": "latest"},
+        }), encoding="utf-8")
+
+        inspected = control_server.inspect_project({
+            "path": str(project),
+            "port": 4323,
+            "kind": "auto",
+        })
+
+        self.assertEqual(inspected["detectedKind"], "next")
+        self.assertEqual(
+            inspected["command"],
+            f"cd -- {project.resolve()} && npm run dev -- --hostname 127.0.0.1 --port 4323",
+        )
+
+    def test_custom_package_script_is_detected_and_can_fall_back_to_static(self) -> None:
+        project = self.root / "custom-package"
+        project.mkdir()
+        (project / "package.json").write_text(json.dumps({
+            "name": "custom-package",
+            "scripts": {"serve": "custom-server"},
+            "dependencies": {"next": "latest", "vite": "latest"},
+        }), encoding="utf-8")
+
+        automatic = control_server.inspect_project({
+            "path": str(project),
+            "port": 4324,
+            "kind": "auto",
+        })
+        static = control_server.inspect_project({
+            "path": str(project),
+            "port": 4324,
+            "kind": "static",
+        })
+
+        self.assertEqual(automatic["detectedKind"], "package")
+        self.assertEqual(automatic["selectedScript"], "serve")
+        self.assertEqual(automatic["packageManager"], "npm")
+        self.assertEqual(
+            automatic["command"],
+            f"cd -- {project.resolve()} && PORT=4324 HOST=127.0.0.1 npm run serve",
+        )
+        self.assertIn("python3 -m http.server 4324", static["command"])
+
+    def test_project_inspection_uses_the_detected_package_manager(self) -> None:
+        project = self.root / "pnpm-project"
+        project.mkdir()
+        (project / "package.json").write_text(json.dumps({
+            "name": "pnpm-project",
+            "scripts": {"dev": "vite"},
+        }), encoding="utf-8")
+        (project / "pnpm-lock.yaml").write_text("lockfileVersion: '9.0'\n", encoding="utf-8")
+
+        inspected = control_server.inspect_project({
+            "path": str(project),
+            "port": 4326,
+            "kind": "auto",
+        })
+
+        self.assertEqual(inspected["packageManager"], "pnpm")
+        self.assertEqual(
+            inspected["command"],
+            f"cd -- {project.resolve()} && corepack pnpm run dev -- --host 127.0.0.1 --port 4326",
+        )
+
+    def test_optional_process_commands_are_validated_and_saved(self) -> None:
+        validated = control_server.validate_project({
+            "id": "custom-process",
+            "name": "Custom process",
+            "host": "127.0.0.1",
+            "port": 4327,
+            "command": "PORT=4327 npm run start",
+            "setupCommand": "npm install",
+            "stopCommand": "npm run stop",
+            "restartCommand": "PORT=4327 npm run restart",
+        })
+
+        self.assertEqual(validated["setupCommand"], "npm install")
+        self.assertEqual(validated["stopCommand"], "npm run stop")
+        self.assertEqual(validated["restartCommand"], "PORT=4327 npm run restart")
+        with self.assertRaisesRegex(ValueError, "setup command"):
+            control_server.validate_project({
+                **validated,
+                "setupCommand": "x" * (control_server.MAX_OPTIONAL_COMMAND_LENGTH + 1),
+            })
+        with self.assertRaisesRegex(ValueError, "restart command must include port 4327"):
+            control_server.validate_project({
+                **validated,
+                "restartCommand": "PORT=9998 npm run restart",
+            })
+
+    def test_optional_project_hook_is_logged_and_checked(self) -> None:
+        project = {
+            "id": "hook-project",
+            "setupCommand": "printf 'setup complete\\n'",
+        }
+
+        control_server.run_project_hook(project, "setupCommand", "Setup", timeout=2)
+        self.assertIn("setup complete", control_server.last_log_line("hook-project"))
+
+        project["setupCommand"] = "exit 7"
+        with self.assertRaisesRegex(ValueError, "status 7"):
+            control_server.run_project_hook(project, "setupCommand", "Setup", timeout=2)
+
+    def test_project_inspection_rejects_relative_or_missing_paths(self) -> None:
+        with self.assertRaisesRegex(ValueError, "full project folder path"):
+            control_server.inspect_project({"path": "relative/path", "port": 4325})
+        with self.assertRaisesRegex(ValueError, "could not be found"):
+            control_server.inspect_project({"path": str(self.root / "missing"), "port": 4325})
+        with self.assertRaisesRegex(ValueError, "specific project folder"):
+            control_server.inspect_project({"path": str(Path.home()), "port": 4325})
+
+    @unittest.skipUnless(sys.platform == "darwin", "folder browsing uses macOS osascript")
+    def test_folder_picker_returns_only_the_user_selected_folder(self) -> None:
+        selected = self.root / "selected-project"
+        selected.mkdir()
+        completed = subprocess.CompletedProcess(
+            args=["/usr/bin/osascript"],
+            returncode=0,
+            stdout=f"{selected}\n",
+            stderr="",
+        )
+        with mock.patch.object(control_server.subprocess, "run", return_value=completed) as run:
+            result = control_server.choose_project_folder()
+
+        self.assertEqual(result, {"cancelled": False, "path": str(selected.resolve())})
+        self.assertEqual(run.call_args.args[0][0], "/usr/bin/osascript")
+
+        control_server.LAST_ACTIONS.clear()
+        cancelled = subprocess.CompletedProcess(
+            args=["/usr/bin/osascript"],
+            returncode=1,
+            stdout="",
+            stderr="execution error: User canceled. (-128)\n",
+        )
+        with mock.patch.object(control_server.subprocess, "run", return_value=cancelled):
+            self.assertEqual(control_server.choose_project_folder(), {"cancelled": True})
 
     def test_native_apps_are_verified_for_the_current_instance(self) -> None:
         source = self.root / "Control Module"

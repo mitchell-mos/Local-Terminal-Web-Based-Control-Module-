@@ -98,7 +98,7 @@ end chooseInstallLocation
 on run
   try
     set sourceFolder to my locateSourceFolder()
-    display dialog "Set up or change Control Module. Everything runs locally on this Mac; no AI service, account, analytics, or cloud connection is used.\n\nApplying settings takes about a minute." with title "Control Module settings" buttons {"Cancel", "Continue"} default button "Continue" cancel button "Cancel" with icon note
+    display dialog "Set up or change Control Module. The dashboard, settings, and saved projects stay on this Mac.\n\nApplying settings takes about a minute." with title "Control Module settings" buttons {"Cancel", "Continue"} default button "Continue" cancel button "Cancel" with icon note
 
     set previousDashboardPort to my savedDashboardPort(sourceFolder)
     set dashboardPort to my chooseDashboardPort(sourceFolder)

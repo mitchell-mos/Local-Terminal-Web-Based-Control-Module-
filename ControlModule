@@ -122,7 +122,7 @@ confirm_setup() {
     return 1
   fi
   /usr/bin/osascript <<'APPLESCRIPT' >/dev/null 2>&1
-display dialog "Control Module needs to install its open-source packages and build the local dashboard. Nothing is sent to an AI service." with title "Set up Control Module?" buttons {"Cancel", "Install"} default button "Install" cancel button "Cancel"
+display dialog "Control Module needs to install its open-source packages and build the local dashboard on this Mac. This usually takes about a minute." with title "Set up Control Module?" buttons {"Cancel", "Install"} default button "Install" cancel button "Cancel"
 APPLESCRIPT
 }
 
@@ -304,11 +304,11 @@ PNPM="$(command -v pnpm || true)"
 COREPACK="$(command -v corepack || true)"
 PYTHON="$(find_supported_python || true)"
 if [[ -z "$NODE" ]]; then
-  show_error "The bundled Node.js runtime is missing. Run Setup again while connected to the internet. No Codex, ChatGPT, or LLM is required."
+  show_error "The bundled Node.js runtime is missing. Run Setup again while connected to the internet."
   exit 1
 fi
 if [[ -z "$PYTHON" ]]; then
-  show_error "Install Python 3.11 or newer, then reopen Control Module. No Codex, ChatGPT, or LLM is required."
+  show_error "Install Python 3.11 or newer, then reopen Control Module."
   exit 1
 fi
 

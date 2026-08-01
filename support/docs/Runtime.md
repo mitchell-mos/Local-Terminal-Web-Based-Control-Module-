@@ -1,6 +1,6 @@
 # Bundled runtime provenance
 
-Release builds of `Control Module.app` may bundle an unmodified Node.js executable so the app can run without Codex, ChatGPT, another LLM, or a system Node.js installation.
+Release builds of `Control Module.app` may bundle an unmodified Node.js executable so the app can run without a system Node.js installation.
 
 The currently verified macOS Apple silicon bundle uses:
 

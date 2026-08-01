@@ -94,11 +94,14 @@ LOG_DIR = DATA_DIR / "logs" / "projects"
 RUNTIME_DIR = DATA_DIR / "runtime"
 BACKUP_DIR = DATA_DIR / "backups"
 SESSION_TOKEN_FILE = RUNTIME_DIR / "session-token"
+DASHBOARD_LOOPBACK_ORIGIN = f"http://127.0.0.1:{WEB_PORT}"
+DASHBOARD_LOCALHOST_ORIGIN = f"http://localhost:{WEB_PORT}"
 ALLOWED_ORIGINS = {
-    f"http://127.0.0.1:{WEB_PORT}",
-    f"http://localhost:{WEB_PORT}",
+    DASHBOARD_LOOPBACK_ORIGIN,
+    DASHBOARD_LOCALHOST_ORIGIN,
 }
 ALLOWED_HOSTS = {f"127.0.0.1:{PORT}", f"localhost:{PORT}"}
+PROJECT_FOLDER_ROOT = Path.home().resolve()
 SAFE_ENVIRONMENT_KEYS = {
     "LANG",
     "LC_ALL",
@@ -279,17 +282,30 @@ def validate_project_directory(raw_path: Any) -> Path:
         raise ValueError("Choose a project folder or enter its path.")
     if len(candidate) > MAX_PROJECT_PATH_LENGTH or "\x00" in candidate:
         raise ValueError("The project folder path is invalid.")
-    path = Path(candidate).expanduser()
-    if not path.is_absolute():
+    expanded = os.path.expanduser(candidate)
+    if not os.path.isabs(expanded):
         raise ValueError("Enter the full project folder path, starting with /.")
     try:
-        resolved = path.resolve(strict=True)
+        safe_root = os.path.realpath(os.fspath(PROJECT_FOLDER_ROOT))
+        resolved_path = os.path.realpath(expanded)
     except (OSError, RuntimeError) as error:
         raise ValueError("That project folder could not be found.") from error
+    if resolved_path == safe_root:
+        raise ValueError("Choose a specific project folder, not the whole Mac or home folder.")
+    safe_prefix = safe_root.rstrip(os.sep) + os.sep
+    if not resolved_path.startswith(safe_prefix):
+        raise ValueError("Choose a project folder inside your home folder.")
+    try:
+        contained = os.path.commonpath((safe_root, resolved_path)) == safe_root
+    except ValueError:
+        contained = False
+    if not contained:
+        raise ValueError("Choose a project folder inside your home folder.")
+    if not os.path.exists(resolved_path):
+        raise ValueError("That project folder could not be found.")
+    resolved = Path(resolved_path)
     if not resolved.is_dir():
         raise ValueError("The selected project path is not a folder.")
-    if resolved == Path(resolved.anchor) or resolved == Path.home().resolve():
-        raise ValueError("Choose a specific project folder, not the whole Mac or home folder.")
     return resolved
 
 
@@ -1170,6 +1186,15 @@ class ControlHandler(BaseHTTPRequestHandler):
             and self.token_allowed()
         )
 
+    def send_allowed_origin_header(self) -> None:
+        origin = self.headers.get("Origin")
+        if origin == DASHBOARD_LOOPBACK_ORIGIN:
+            self.send_header("Access-Control-Allow-Origin", DASHBOARD_LOOPBACK_ORIGIN)
+            self.send_header("Vary", "Origin")
+        elif origin == DASHBOARD_LOCALHOST_ORIGIN:
+            self.send_header("Access-Control-Allow-Origin", DASHBOARD_LOCALHOST_ORIGIN)
+            self.send_header("Vary", "Origin")
+
     def send_json(self, status: int, payload: dict[str, Any]) -> None:
         body = json.dumps(payload).encode("utf-8")
         self.send_response(status)
@@ -1181,10 +1206,7 @@ class ControlHandler(BaseHTTPRequestHandler):
         self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "DENY")
-        origin = self.headers.get("Origin")
-        if origin in ALLOWED_ORIGINS:
-            self.send_header("Access-Control-Allow-Origin", origin)
-            self.send_header("Vary", "Origin")
+        self.send_allowed_origin_header()
         self.end_headers()
         self.wfile.write(body)
 
@@ -1217,10 +1239,7 @@ class ControlHandler(BaseHTTPRequestHandler):
             self.send_json(403, {"error": "This runner only accepts requests from Control Module."})
             return
         self.send_response(204)
-        origin = self.headers.get("Origin")
-        if origin:
-            self.send_header("Access-Control-Allow-Origin", origin)
-            self.send_header("Vary", "Origin")
+        self.send_allowed_origin_header()
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Control-Token")
         self.send_header("Access-Control-Max-Age", "600")

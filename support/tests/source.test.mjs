@@ -39,6 +39,10 @@ test("does not ship private user data or AI runtime dependencies", async () => {
   assert.match(runner, /\/api\/projects\/inspect/);
   assert.match(runner, /\/api\/system\/choose-folder/);
   assert.match(runner, /MAX_PACKAGE_JSON_BYTES/);
+  assert.match(runner, /PROJECT_FOLDER_ROOT/);
+  assert.match(runner, /resolved_path\.startswith\(safe_prefix\)/);
+  assert.match(runner, /send_allowed_origin_header/);
+  assert.doesNotMatch(runner, /send_header\("Access-Control-Allow-Origin", origin\)/);
   assert.match(runner, /BROWSER_BLOCKED_PROJECT_PORTS/);
   assert.match(runner, /project_port_restriction_reason/);
   assert.match(runner, /\/usr\/bin\/open/);

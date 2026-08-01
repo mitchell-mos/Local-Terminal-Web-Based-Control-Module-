@@ -32,6 +32,8 @@ class ControlServerTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
+        self.previous_project_folder_root = control_server.PROJECT_FOLDER_ROOT
+        control_server.PROJECT_FOLDER_ROOT = self.root
         control_server.DATA_DIR = self.root / "data"
         control_server.PROJECTS_FILE = control_server.DATA_DIR / "projects.json"
         control_server.LOG_DIR = control_server.DATA_DIR / "logs" / "projects"
@@ -48,6 +50,7 @@ class ControlServerTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         control_server.stop_all_processes()
+        control_server.PROJECT_FOLDER_ROOT = self.previous_project_folder_root
         self.temporary.cleanup()
 
     def test_first_run_is_empty_and_private(self) -> None:
@@ -366,7 +369,39 @@ class ControlServerTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "could not be found"):
             control_server.inspect_project({"path": str(self.root / "missing"), "port": 4325})
         with self.assertRaisesRegex(ValueError, "specific project folder"):
-            control_server.inspect_project({"path": str(Path.home()), "port": 4325})
+            control_server.inspect_project({"path": str(self.root), "port": 4325})
+
+    def test_project_inspection_rejects_paths_outside_the_safe_root(self) -> None:
+        outside = Path.home().resolve()
+        with self.assertRaisesRegex(ValueError, "inside your home folder"):
+            control_server.inspect_project({"path": str(outside), "port": 4325})
+
+        traversal = self.root / "project" / ".." / ".."
+        with self.assertRaisesRegex(ValueError, "inside your home folder"):
+            control_server.inspect_project({"path": str(traversal), "port": 4325})
+
+        escaped_link = self.root / "escaped-project"
+        escaped_link.symlink_to(outside, target_is_directory=True)
+        with self.assertRaisesRegex(ValueError, "inside your home folder"):
+            control_server.inspect_project({"path": str(escaped_link), "port": 4325})
+
+    def test_cors_header_uses_only_canonical_origin_constants(self) -> None:
+        handler = object.__new__(control_server.ControlHandler)
+        handler.send_header = mock.Mock()
+
+        handler.headers = {"Origin": control_server.DASHBOARD_LOOPBACK_ORIGIN}
+        handler.send_allowed_origin_header()
+        handler.send_header.assert_any_call(
+            "Access-Control-Allow-Origin",
+            control_server.DASHBOARD_LOOPBACK_ORIGIN,
+        )
+
+        handler.send_header.reset_mock()
+        handler.headers = {
+            "Origin": control_server.DASHBOARD_LOOPBACK_ORIGIN + "\r\nX-Injected: yes",
+        }
+        handler.send_allowed_origin_header()
+        handler.send_header.assert_not_called()
 
     @unittest.skipUnless(sys.platform == "darwin", "folder browsing uses macOS osascript")
     def test_folder_picker_returns_only_the_user_selected_folder(self) -> None:

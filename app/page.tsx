@@ -62,6 +62,10 @@ type RestartPrompt = {
   project: Project;
   tabWasOpen: boolean;
   tabReloaded: boolean;
+  tabCount: number;
+  browserNames: string[];
+  nativeTabManaged: boolean;
+  permissionDenied: boolean;
 };
 
 type TrackedProjectWindow = {
@@ -118,6 +122,15 @@ type PortAvailability = {
 type PortFeedback = {
   kind: "success" | "error" | "checking";
   message: string;
+};
+
+type BrowserTabResult = {
+  available: boolean;
+  matched: number;
+  refreshed: number;
+  focused: number;
+  permissionDenied: boolean;
+  browsers: string[];
 };
 
 type BasicProjectInspection = {
@@ -839,6 +852,13 @@ function getLocalAddressLabel(port: number | string) {
   return `localhost:${port} & 127.0.0.1:${port}`;
 }
 
+function browserNamesLabel(names: string[]) {
+  if (names.length === 0) return "your browser";
+  if (names.length === 1) return names[0];
+  if (names.length === 2) return `${names[0]} and ${names[1]}`;
+  return `${names.slice(0, -1).join(", ")}, and ${names[names.length - 1]}`;
+}
+
 function getAddedDetails(createdAt: number) {
   const addedDate = new Date(createdAt);
   const date = new Intl.DateTimeFormat(undefined, {
@@ -1078,6 +1098,7 @@ export default function Home() {
   const [selectedProjectIds, setSelectedProjectIds] = useState<Record<string, boolean>>({});
   const [stopAllOpen, setStopAllOpen] = useState(false);
   const [restartPrompt, setRestartPrompt] = useState<RestartPrompt | null>(null);
+  const [restartPromptOpening, setRestartPromptOpening] = useState(false);
   const [isStartingAll, setIsStartingAll] = useState(false);
   const [isStoppingAll, setIsStoppingAll] = useState(false);
   const [actionCooldownActive, setActionCooldownActive] = useState(false);
@@ -1592,6 +1613,7 @@ export default function Home() {
         }
         if (restartPrompt) {
           setRestartPrompt(null);
+          setRestartPromptOpening(false);
           window.requestAnimationFrame(() => restartTriggerRef.current?.focus());
         }
         if (addProjectOpen) {
@@ -2463,26 +2485,86 @@ export default function Home() {
       // The host restart still succeeded; opening it remains available below.
     }
 
+    let nativeResult: BrowserTabResult | null = null;
+    try {
+      nativeResult = await apiRequest<BrowserTabResult>("/api/projects/browser-tabs", {
+        method: "POST",
+        body: JSON.stringify({ id: project.id, action: "refresh" }),
+      });
+      if (nativeResult.matched > 0) {
+        return {
+          tabWasOpen: true,
+          tabReloaded: nativeResult.refreshed > 0,
+          tabCount: nativeResult.matched,
+          browserNames: nativeResult.browsers,
+          nativeTabManaged: true,
+          permissionDenied: nativeResult.permissionDenied,
+        };
+      }
+    } catch {
+      // Older runners and browsers without macOS automation use the safe window fallback.
+    }
+
     const trackedWindow = projectWindows.current[project.id];
     if (trackedWindow && !trackedWindow.window.closed) {
       try {
         trackedWindow.window.location.href = projectUrl(project, trackedWindow.host, true);
-        return { tabWasOpen: true, tabReloaded: true };
+        return {
+          tabWasOpen: true,
+          tabReloaded: true,
+          tabCount: 1,
+          browserNames: [],
+          nativeTabManaged: false,
+          permissionDenied: nativeResult?.permissionDenied === true,
+        };
       } catch {
-        return { tabWasOpen: true, tabReloaded: false };
+        return {
+          tabWasOpen: true,
+          tabReloaded: false,
+          tabCount: 1,
+          browserNames: [],
+          nativeTabManaged: false,
+          permissionDenied: nativeResult?.permissionDenied === true,
+        };
       }
     }
-    return { tabWasOpen: false, tabReloaded: false };
+    return {
+      tabWasOpen: false,
+      tabReloaded: false,
+      tabCount: 0,
+      browserNames: [],
+      nativeTabManaged: false,
+      permissionDenied: nativeResult?.permissionDenied === true,
+    };
   }
 
   function closeRestartPrompt() {
+    if (restartPromptOpening) return;
     setRestartPrompt(null);
     window.requestAnimationFrame(() => restartTriggerRef.current?.focus());
   }
 
-  function acceptRestartPrompt() {
+  async function acceptRestartPrompt() {
     if (!restartPrompt) return;
-    const { project, tabWasOpen, tabReloaded } = restartPrompt;
+    const { project, tabWasOpen, tabReloaded, nativeTabManaged } = restartPrompt;
+    setRestartPromptOpening(true);
+    if (nativeTabManaged) {
+      try {
+        const result = await apiRequest<BrowserTabResult>("/api/projects/browser-tabs", {
+          method: "POST",
+          body: JSON.stringify({ id: project.id, action: "focus" }),
+        });
+        if (result.focused > 0) {
+          setRestartPrompt(null);
+          return;
+        }
+      } catch {
+        // The project is still refreshed; the regular browser fallback remains available.
+      } finally {
+        setRestartPromptOpening(false);
+      }
+    }
+
     const trackedWindow = projectWindows.current[project.id];
     if (tabWasOpen && trackedWindow && !trackedWindow.window.closed) {
       if (!tabReloaded) {
@@ -2492,11 +2574,13 @@ export default function Home() {
         trackedWindow.window.focus();
       }
       setRestartPrompt(null);
+      setRestartPromptOpening(false);
       return;
     }
 
     const opened = openProject(project, PRIMARY_HOST, tabWasOpen && !tabReloaded);
     if (opened) setRestartPrompt(null);
+    setRestartPromptOpening(false);
   }
 
   async function startProject(project: Project) {
@@ -2569,6 +2653,7 @@ export default function Home() {
     if (!beginProjectRateLimitedAction(project.id)) return;
     restartTriggerRef.current = trigger || null;
     setRestartPrompt(null);
+    setRestartPromptOpening(false);
     setProjectBusy(project.id, true);
     setRestartingIds((current) => ({ ...current, [project.id]: true }));
     setError("");
@@ -4461,25 +4546,31 @@ export default function Home() {
             <div className="restart-open-content">
               <p id="restart-open-description">
                 {restartPrompt.tabWasOpen
-                  ? "The host is running again and an open project tab was detected."
+                  ? `The host is running again and ${restartPrompt.tabCount === 1 ? "an open project tab was" : `${restartPrompt.tabCount} open project tabs were`} detected.`
                   : "The host is running again. Open the project now?"}
               </p>
               <div
-                className={`restart-tab-state ${restartPrompt.tabWasOpen ? "tab-found" : "tab-not-found"}`}
+                className={`restart-tab-state ${restartPrompt.tabWasOpen ? "tab-found" : restartPrompt.permissionDenied ? "permission-needed" : "tab-not-found"}`}
               >
                 <span className="restart-tab-state-dot" aria-hidden="true" />
                 <div>
                   <strong>
                     {restartPrompt.tabWasOpen
-                      ? restartPrompt.tabReloaded ? "Open tab refreshed" : "Open tab found"
-                      : "No open project tab"}
+                      ? restartPrompt.tabReloaded
+                        ? restartPrompt.tabCount === 1 ? "Open tab refreshed" : `${restartPrompt.tabCount} open tabs refreshed`
+                        : restartPrompt.tabCount === 1 ? "Open tab found" : `${restartPrompt.tabCount} open tabs found`
+                      : restartPrompt.permissionDenied ? "Browser access is off" : "No open project tab"}
                   </strong>
                   <span>
                     {restartPrompt.tabWasOpen
-                      ? restartPrompt.tabReloaded
-                        ? "The tab received a fresh reload. Switch to it to review the restarted host."
-                        : "The browser blocked the automatic reload. Use the button below to try again."
-                      : "The local site is ready whenever you want to check it."}
+                      ? restartPrompt.nativeTabManaged
+                        ? `Matched ${browserNamesLabel(restartPrompt.browserNames)} by port and kept each tab's current page, including nested routes.`
+                        : restartPrompt.tabReloaded
+                          ? "The tracked tab received a fresh reload. Switch to it to review the restarted host."
+                          : "The browser kept the tab open but blocked its automatic reload."
+                      : restartPrompt.permissionDenied
+                        ? "Allow Control Module under System Settings → Privacy & Security → Automation to detect existing local tabs."
+                        : "The local site is ready whenever you want to check it."}
                   </span>
                 </div>
               </div>
@@ -4488,13 +4579,29 @@ export default function Home() {
               </code>
             </div>
             <div className="modal-actions">
-              <button className="button" type="button" onClick={closeRestartPrompt} autoFocus>
+              <button
+                className="button"
+                type="button"
+                onClick={closeRestartPrompt}
+                disabled={restartPromptOpening}
+                autoFocus
+              >
                 Stay here
               </button>
-              <button className="button open" type="button" onClick={acceptRestartPrompt}>
-                {restartPrompt.tabWasOpen
-                  ? restartPrompt.tabReloaded ? "Go to refreshed tab" : "Refresh and view tab"
-                  : "Open website"}
+              <button
+                className="button open"
+                type="button"
+                onClick={() => void acceptRestartPrompt()}
+                disabled={restartPromptOpening}
+                aria-busy={restartPromptOpening}
+              >
+                {restartPromptOpening
+                  ? "Opening…"
+                  : restartPrompt.nativeTabManaged
+                    ? "Go to browser"
+                    : restartPrompt.tabWasOpen
+                      ? restartPrompt.tabReloaded ? "Go to refreshed tab" : "Refresh and view tab"
+                      : "Open website"}
               </button>
             </div>
           </section>

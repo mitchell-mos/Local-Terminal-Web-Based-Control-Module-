@@ -89,6 +89,7 @@ def configured_web_port() -> int:
 
 WEB_PORT = configured_web_port()
 PROJECT_DIR = Path(__file__).resolve().parents[1]
+BROWSER_TAB_SCRIPT = PROJECT_DIR / "server" / "browser_tabs.jxa"
 DEFAULT_DATA_DIR = PROJECT_DIR / ".control-module-data"
 DATA_DIR = Path(os.environ.get("CONTROL_MODULE_DATA_DIR", DEFAULT_DATA_DIR)).expanduser().resolve()
 PROJECTS_FILE = DATA_DIR / "projects.json"
@@ -276,6 +277,91 @@ def choose_project_folder() -> dict[str, Any]:
         return {"cancelled": True}
     directory = validate_project_directory(selected)
     return {"cancelled": False, "path": str(directory)}
+
+
+def project_browser_tabs(project_id: str, action: str) -> dict[str, Any]:
+    """Find, refresh, or focus browser tabs for one saved local project."""
+    if not ID_PATTERN.fullmatch(project_id):
+        raise ValueError("The project ID is invalid.")
+    if action not in {"detect", "refresh", "focus"}:
+        raise ValueError("The browser tab action is invalid.")
+    with LOCK:
+        project = next(
+            (item for item in read_projects() if item.get("id") == project_id),
+            None,
+        )
+    if project is None:
+        raise ValueError("That project could not be found.")
+    port = int(project["port"])
+    empty_result = {
+        "available": False,
+        "matched": 0,
+        "refreshed": 0,
+        "focused": 0,
+        "permissionDenied": False,
+        "browsers": [],
+    }
+    if sys.platform != "darwin" or not BROWSER_TAB_SCRIPT.is_file():
+        return empty_result
+
+    enforce_action_rate_limit([f"browser-tab:{project_id}:{action}"])
+    try:
+        completed = subprocess.run(
+            [
+                "/usr/bin/osascript",
+                "-l",
+                "JavaScript",
+                str(BROWSER_TAB_SCRIPT),
+                str(port),
+                action,
+            ],
+            check=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return empty_result
+
+    combined_error = f"{completed.stdout}\n{completed.stderr}"
+    if completed.returncode != 0:
+        return {
+            **empty_result,
+            "permissionDenied": bool(
+                "-1743" in combined_error
+                or re.search(r"not authorized|not permitted", combined_error, re.IGNORECASE)
+            ),
+        }
+    try:
+        payload = json.loads(completed.stdout.strip())
+    except (json.JSONDecodeError, TypeError):
+        return empty_result
+    if not isinstance(payload, dict):
+        return empty_result
+
+    browsers = payload.get("browsers", [])
+    safe_browsers = [
+        str(name)[:40]
+        for name in browsers
+        if isinstance(name, str) and name.strip()
+    ][:6] if isinstance(browsers, list) else []
+
+    def safe_count(name: str) -> int:
+        try:
+            return max(0, min(int(payload.get(name, 0)), 100))
+        except (TypeError, ValueError):
+            return 0
+
+    return {
+        "available": payload.get("available") is True,
+        "matched": safe_count("matched"),
+        "refreshed": safe_count("refreshed"),
+        "focused": safe_count("focused"),
+        "permissionDenied": payload.get("permissionDenied") is True,
+        "browsers": safe_browsers,
+    }
 
 
 def validate_project_directory(raw_path: Any) -> Path:
@@ -1315,6 +1401,10 @@ class ControlHandler(BaseHTTPRequestHandler):
                 self.start_project(payload)
             elif self.path == "/api/projects/restart":
                 self.restart_project(payload)
+            elif self.path == "/api/projects/browser-tabs":
+                project_id = str(payload.get("id", "")).strip()
+                action = str(payload.get("action", "detect")).strip()
+                self.send_json(200, project_browser_tabs(project_id, action))
             elif self.path == "/api/projects/stop":
                 self.stop_project(payload)
             elif self.path == "/api/projects/stop-all":

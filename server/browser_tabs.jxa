@@ -1,0 +1,118 @@
+function isMatchingProjectUrl(rawUrl, port) {
+  if (typeof rawUrl !== "string") return false;
+  var origins = [
+    "http://127.0.0.1:" + port,
+    "http://localhost:" + port,
+    "https://127.0.0.1:" + port,
+    "https://localhost:" + port,
+  ];
+  return origins.some(function (origin) {
+    if (rawUrl.indexOf(origin) !== 0) return false;
+    var boundary = rawUrl.charAt(origin.length);
+    return boundary === "" || boundary === "/" || boundary === "?" || boundary === "#";
+  });
+}
+
+function freshProjectUrl(rawUrl) {
+  var hash = "";
+  var hashIndex = rawUrl.indexOf("#");
+  var withoutHash = rawUrl;
+  if (hashIndex >= 0) {
+    hash = rawUrl.slice(hashIndex);
+    withoutHash = rawUrl.slice(0, hashIndex);
+  }
+
+  var queryIndex = withoutHash.indexOf("?");
+  var path = queryIndex >= 0 ? withoutHash.slice(0, queryIndex) : withoutHash;
+  var query = queryIndex >= 0 ? withoutHash.slice(queryIndex + 1) : "";
+  var parameters = query
+    ? query.split("&").filter(function (entry) {
+        return entry && entry.split("=", 1)[0] !== "_control_reload";
+      })
+    : [];
+  parameters.push("_control_reload=" + Date.now());
+  return path + "?" + parameters.join("&") + hash;
+}
+
+function scanBrowser(browserDefinition, port, action, result) {
+  var browser;
+  try {
+    browser = Application(browserDefinition.name);
+    if (!browser.running()) return false;
+  } catch (_) {
+    return false;
+  }
+
+  try {
+    var windows = browser.windows();
+    for (var windowIndex = 0; windowIndex < windows.length; windowIndex += 1) {
+      var browserWindow = windows[windowIndex];
+      var tabs = browserWindow.tabs();
+      for (var tabIndex = 0; tabIndex < tabs.length; tabIndex += 1) {
+        var tab = tabs[tabIndex];
+        var tabUrl = String(tab.url() || "");
+        if (!isMatchingProjectUrl(tabUrl, port)) continue;
+
+        result.matched += 1;
+        if (result.browsers.indexOf(browserDefinition.label) < 0) {
+          result.browsers.push(browserDefinition.label);
+        }
+
+        if (action === "refresh") {
+          tab.url = freshProjectUrl(tabUrl);
+          result.refreshed += 1;
+        } else if (action === "focus" && result.focused === 0) {
+          if (browserDefinition.kind === "safari") {
+            browserWindow.currentTab = tab;
+          } else {
+            browserWindow.activeTabIndex = tabIndex + 1;
+          }
+          browserWindow.index = 1;
+          browser.activate();
+          result.focused = 1;
+          return true;
+        }
+      }
+    }
+  } catch (error) {
+    var message = String(error);
+    if (message.indexOf("-1743") >= 0 || /not authorized|not permitted/i.test(message)) {
+      result.permissionDenied = true;
+    }
+  }
+  return false;
+}
+
+function run(argumentsList) {
+  var port = Number(argumentsList[0]);
+  var action = String(argumentsList[1] || "detect");
+  var result = {
+    available: true,
+    matched: 0,
+    refreshed: 0,
+    focused: 0,
+    permissionDenied: false,
+    browsers: [],
+  };
+  if (!Number.isInteger(port) || port < 1026 || port > 9999) {
+    result.available = false;
+    return JSON.stringify(result);
+  }
+  if (["detect", "refresh", "focus"].indexOf(action) < 0) {
+    result.available = false;
+    return JSON.stringify(result);
+  }
+
+  var browserDefinitions = [
+    { name: "Safari", label: "Safari", kind: "safari" },
+    { name: "Google Chrome", label: "Chrome", kind: "chromium" },
+    { name: "Brave Browser", label: "Brave", kind: "chromium" },
+    { name: "Microsoft Edge", label: "Edge", kind: "chromium" },
+    { name: "Chromium", label: "Chromium", kind: "chromium" },
+    { name: "Arc", label: "Arc", kind: "chromium" },
+  ];
+  for (var index = 0; index < browserDefinitions.length; index += 1) {
+    if (scanBrowser(browserDefinitions[index], port, action, result) && action === "focus") break;
+  }
+  return JSON.stringify(result);
+}

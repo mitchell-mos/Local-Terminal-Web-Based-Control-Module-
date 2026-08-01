@@ -156,9 +156,42 @@ process_is_owned_dashboard() {
   local process_cwd process_command
   process_cwd="$(/usr/sbin/lsof -a -p "$process_id" -d cwd -Fn 2>/dev/null \
     | /usr/bin/sed -n 's/^n//p' | /usr/bin/head -1 || true)"
-  [[ -n "$process_cwd" && "${process_cwd:A}" == "${PROJECT_DIR:A}" ]] || return 1
+  [[ -n "$process_cwd" ]] || return 1
+  process_cwd="${process_cwd:A}"
+  [[ "$process_cwd" == "${PROJECT_DIR:A}" \
+    || ( -n "$CONFIGURED_PROJECT_DIR" && "$process_cwd" == "${CONFIGURED_PROJECT_DIR:A}" ) ]] || return 1
   process_command="$(/bin/ps -ww -p "$process_id" -o command= 2>/dev/null || true)"
   [[ "$process_command" == *"node_modules/vinext/dist/cli.js"* && "$process_command" == *" start "* ]]
+}
+
+runner_listener_pid() {
+  /usr/sbin/lsof -tiTCP:"$RUNNER_PORT" -sTCP:LISTEN 2>/dev/null | /usr/bin/head -1 || true
+}
+
+process_is_owned_runner() {
+  local process_id="$1"
+  local process_cwd process_command
+  process_cwd="$(/usr/sbin/lsof -a -p "$process_id" -d cwd -Fn 2>/dev/null \
+    | /usr/bin/sed -n 's/^n//p' | /usr/bin/head -1 || true)"
+  [[ -n "$process_cwd" ]] || return 1
+  process_cwd="${process_cwd:A}"
+  [[ "$process_cwd" == "${PROJECT_DIR:A}" \
+    || ( -n "$CONFIGURED_PROJECT_DIR" && "$process_cwd" == "${CONFIGURED_PROJECT_DIR:A}" ) ]] || return 1
+  process_command="$(/bin/ps -ww -p "$process_id" -o command= 2>/dev/null || true)"
+  [[ "$process_command" == *"control_server.py"* ]]
+}
+
+stop_broken_owned_runner() {
+  local process_id attempt
+  process_id="$(runner_listener_pid)"
+  [[ -n "$process_id" ]] || return 0
+  process_is_owned_runner "$process_id" || return 1
+  /bin/kill -TERM "$process_id" 2>/dev/null || return 1
+  for attempt in {1..60}; do
+    /bin/kill -0 "$process_id" 2>/dev/null || return 0
+    /bin/sleep 0.1
+  done
+  return 1
 }
 
 stop_broken_owned_dashboard() {
@@ -179,6 +212,56 @@ runner_ready() {
   token="$(session_token)"
   [[ -n "$token" ]] || return 1
   /usr/bin/curl -fsS -H "X-Control-Token: $token" "$RUNNER_URL" 2>/dev/null | /usr/bin/grep -q '"ok": true'
+}
+
+dashboard_ready() {
+  local process_id
+  web_assets_ready || return 1
+  process_id="$(dashboard_listener_pid)"
+  [[ -n "$process_id" ]] || return 1
+  process_is_owned_dashboard "$process_id"
+}
+
+runner_port_is_reserved_by_another_instance() {
+  local candidate="$1"
+  local port_file reserved_port
+  for port_file in "$CONFIG_ROOT/instances/"*/runner-port(N); do
+    [[ "${port_file:h}" == "$USER_CONFIG_DIR" ]] && continue
+    reserved_port=""
+    IFS= read -r reserved_port < "$port_file" || true
+    [[ "$reserved_port" == "$candidate" ]] && return 0
+  done
+  return 1
+}
+
+runner_port_is_available() {
+  local candidate="$1"
+  (( candidate != WEB_PORT )) || return 1
+  runner_port_is_reserved_by_another_instance "$candidate" && return 1
+  ! /usr/sbin/lsof -nP -iTCP:"$candidate" -sTCP:LISTEN >/dev/null 2>&1
+}
+
+select_available_runner_port() {
+  local candidate
+  for candidate in {10001..10999}; do
+    if runner_port_is_available "$candidate"; then
+      print -r -- "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+save_runner_port() {
+  local selected_port="$1"
+  local temporary_file
+  temporary_file="$(/usr/bin/mktemp "$USER_CONFIG_DIR/.runner-port.XXXXXX")" || return 1
+  if ! print -r -- "$selected_port" > "$temporary_file"; then
+    /bin/rm -f "$temporary_file"
+    return 1
+  fi
+  /bin/chmod 600 "$temporary_file"
+  /bin/mv -f "$temporary_file" "$RUNNER_PORT_FILE"
 }
 
 open_control_module() {
@@ -362,21 +445,42 @@ for private_file in "$WEB_LOG" "$RUNNER_LOG" "$PROJECT_DATA_FILE"; do
   [[ -f "$private_file" ]] && /bin/chmod 600 "$private_file"
 done
 
-if web_assets_ready && runner_ready; then
+RUNNER_PORT_CHANGED=0
+if ! runner_ready && /usr/sbin/lsof -nP -iTCP:"$RUNNER_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+  if ! stop_broken_owned_runner; then
+    AVAILABLE_RUNNER_PORT="$(select_available_runner_port || true)"
+    if [[ -z "$AVAILABLE_RUNNER_PORT" ]]; then
+      show_error "No private runner port is available from 10001 to 10999. The dashboard remains set to port $WEB_PORT."
+      exit 1
+    fi
+    if ! save_runner_port "$AVAILABLE_RUNNER_PORT"; then
+      show_error "The private runner port could not be updated safely. The dashboard remains set to port $WEB_PORT."
+      exit 1
+    fi
+    RUNNER_PORT="$AVAILABLE_RUNNER_PORT"
+    RUNNER_URL="http://127.0.0.1:$RUNNER_PORT/health"
+    export CONTROL_MODULE_RUNNER_PORT="$RUNNER_PORT"
+    RUNNER_PORT_CHANGED=1
+  fi
+fi
+
+if dashboard_ready && runner_ready; then
   open_control_module
   exit 0
 fi
 
-if ! web_assets_ready && /usr/sbin/lsof -nP -iTCP:"$WEB_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+if (( RUNNER_PORT_CHANGED )) && /usr/sbin/lsof -nP -iTCP:"$WEB_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
   if ! stop_broken_owned_dashboard; then
-    show_error "Port $WEB_PORT belongs to another program or a dashboard that could not stop safely. It was left unchanged."
+    show_error "The selected dashboard port $WEB_PORT belongs to another program or a dashboard that could not restart safely. It was left unchanged."
     exit 1
   fi
 fi
 
-if ! runner_ready && /usr/sbin/lsof -nP -iTCP:"$RUNNER_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
-  show_error "This installation's private runner port $RUNNER_PORT is already being used by another program. Run Setup again."
-  exit 1
+if ! dashboard_ready && /usr/sbin/lsof -nP -iTCP:"$WEB_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+  if ! stop_broken_owned_dashboard; then
+    show_error "The selected dashboard port $WEB_PORT belongs to another program or a dashboard that could not stop safely. It was left unchanged."
+    exit 1
+  fi
 fi
 
 if ! runner_ready; then
@@ -384,13 +488,13 @@ if ! runner_ready; then
   RUNNER_PID=$!
 fi
 
-if ! web_ready; then
+if ! dashboard_ready; then
   "$NODE" "$VINEXT_CLI" start --hostname 127.0.0.1 --port "$WEB_PORT" >>"$WEB_LOG" 2>&1 &
   WEB_PID=$!
 fi
 
 for attempt in {1..80}; do
-  if web_assets_ready && runner_ready; then
+  if dashboard_ready && runner_ready; then
     open_control_module
     if [[ -n "$WEB_PID" ]]; then
       wait "$WEB_PID"

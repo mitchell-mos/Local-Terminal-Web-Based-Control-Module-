@@ -2484,8 +2484,8 @@ textarea:focus-visible {
 }
 
 .restart-icon {
-  width: 15px;
-  height: 15px;
+  width: 16px;
+  height: 16px;
   -webkit-mask-image: url("/icons/restart-loader.svg");
   mask-image: url("/icons/restart-loader.svg");
 }
@@ -3246,8 +3246,8 @@ textarea:focus-visible {
 }
 
 .restart-open-symbol .restart-icon {
-  width: 18px;
-  height: 18px;
+  width: 19px;
+  height: 19px;
 }
 
 .restart-open-content {
@@ -3279,6 +3279,10 @@ textarea:focus-visible {
 
 .restart-tab-state.tab-found .restart-tab-state-dot {
   background: var(--success);
+}
+
+.restart-tab-state.permission-needed .restart-tab-state-dot {
+  background: var(--error);
 }
 
 .restart-tab-state strong,

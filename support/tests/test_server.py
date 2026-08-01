@@ -33,6 +33,7 @@ class ControlServerTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
         self.previous_project_folder_root = control_server.PROJECT_FOLDER_ROOT
+        self.previous_browser_tab_script = control_server.BROWSER_TAB_SCRIPT
         control_server.PROJECT_FOLDER_ROOT = self.root
         control_server.DATA_DIR = self.root / "data"
         control_server.PROJECTS_FILE = control_server.DATA_DIR / "projects.json"
@@ -51,6 +52,7 @@ class ControlServerTests(unittest.TestCase):
     def tearDown(self) -> None:
         control_server.stop_all_processes()
         control_server.PROJECT_FOLDER_ROOT = self.previous_project_folder_root
+        control_server.BROWSER_TAB_SCRIPT = self.previous_browser_tab_script
         self.temporary.cleanup()
 
     def test_first_run_is_empty_and_private(self) -> None:
@@ -99,6 +101,81 @@ class ControlServerTests(unittest.TestCase):
 
         self.assertEqual(control_server.LAST_ACTIONS["first-project"], 100.0)
         self.assertEqual(control_server.LAST_ACTIONS["second-project"], 100.0)
+
+    def test_browser_tab_refresh_uses_only_the_saved_project_port(self) -> None:
+        control_server.write_projects([{
+            "id": "local-site",
+            "name": "Local site",
+            "host": "127.0.0.1",
+            "port": 4321,
+            "command": "python3 -m http.server 4321",
+            "createdAt": 1,
+            "updatedAt": 1,
+        }])
+        control_server.BROWSER_TAB_SCRIPT = self.root / "browser_tabs.jxa"
+        control_server.BROWSER_TAB_SCRIPT.write_text("function run() {}\n", encoding="utf-8")
+        completed = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout=json.dumps({
+                "available": True,
+                "matched": 2,
+                "refreshed": 2,
+                "focused": 0,
+                "permissionDenied": False,
+                "browsers": ["Safari", "Chrome"],
+            }),
+            stderr="",
+        )
+
+        with (
+            mock.patch.object(control_server.sys, "platform", "darwin"),
+            mock.patch.object(control_server.subprocess, "run", return_value=completed) as run,
+        ):
+            result = control_server.project_browser_tabs("local-site", "refresh")
+
+        self.assertEqual(result["matched"], 2)
+        self.assertEqual(result["refreshed"], 2)
+        self.assertEqual(result["browsers"], ["Safari", "Chrome"])
+        self.assertEqual(
+            run.call_args.args[0],
+            [
+                "/usr/bin/osascript",
+                "-l",
+                "JavaScript",
+                str(control_server.BROWSER_TAB_SCRIPT),
+                "4321",
+                "refresh",
+            ],
+        )
+
+    def test_browser_tab_refresh_reports_denied_automation_without_failing_restart(self) -> None:
+        control_server.write_projects([{
+            "id": "local-site",
+            "name": "Local site",
+            "host": "localhost",
+            "port": 4321,
+            "command": "python3 -m http.server 4321",
+            "createdAt": 1,
+            "updatedAt": 1,
+        }])
+        control_server.BROWSER_TAB_SCRIPT = self.root / "browser_tabs.jxa"
+        control_server.BROWSER_TAB_SCRIPT.write_text("function run() {}\n", encoding="utf-8")
+        denied = subprocess.CompletedProcess(
+            args=[],
+            returncode=1,
+            stdout="",
+            stderr="Not authorized to send Apple events. (-1743)",
+        )
+
+        with (
+            mock.patch.object(control_server.sys, "platform", "darwin"),
+            mock.patch.object(control_server.subprocess, "run", return_value=denied),
+        ):
+            result = control_server.project_browser_tabs("local-site", "refresh")
+
+        self.assertFalse(result["available"])
+        self.assertTrue(result["permissionDenied"])
 
     def test_corrupt_data_is_preserved_and_reported(self) -> None:
         control_server.ensure_private_directory(control_server.PROJECTS_FILE.parent)

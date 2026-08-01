@@ -41,6 +41,8 @@ Use **App functions → More → Export projects** to move project definitions b
 
 Project search, status filter, sorting, and list/card view preferences are saved in the browser for that loopback dashboard address and restored after reload. **Filters → Clear all** always restores manual order with every project visible. These browser preferences do not contain project commands, paths, logs, or runner credentials.
 
+After a host restart on macOS, Control Module can use Apple Events to find open Safari or Chromium-family tabs whose address exactly matches that saved project's `localhost` or `127.0.0.1` port. Matching ignores the page path, so routes such as `/about` are refreshed in place and preserved. macOS may ask for Automation permission the first time. Control Module reads only open-tab addresses during this explicit restart flow, refreshes only matching local tabs, does not read page contents or browsing history, and does not save or transmit the addresses. Choosing **Go to browser** focuses the matching tab.
+
 When you change the install location, Setup verifies the previous launcher's internal installation marker, installs and records the replacement first, updates its shortcut, and then moves only that superseded launcher to Trash. Other Control Module installations and unrelated apps are untouched.
 
 On first setup, each downloaded Control Module folder receives a random, non-secret internal installation marker. The same marker is recorded in the folder, installed app bundle, and private settings directory. Setup detects a Finder copy carrying another folder's marker and assigns the copy a new one. Source files are not individually modified or stamped with a secret; folder membership plus matching ownership markers provides the uninstall boundary without corrupting project files or exposing the private runner token.
@@ -72,7 +74,7 @@ Other downloaded Control Module folders, apps in Applications, Desktop shortcuts
 
 Maintainers can preview the exact native-app uninstall without changing anything by running `support/mac/uninstall.sh --source "$PWD" --remove-source --dry-run`.
 
-The launcher starts the dashboard at the port selected during Setup and an automatically assigned private command-runner port. Both services bind only to the loopback interface. On first graphical launch, Control Module can ask permission to install packages and build the dashboard for you.
+The launcher starts the dashboard at the port selected during Setup and an automatically assigned private command-runner port. If that internal port later becomes occupied, the launcher selects and saves another private port while leaving the user-selected dashboard port unchanged. Both services bind only to the loopback interface. On first graphical launch, Control Module can ask permission to install packages and build the dashboard for you.
 
 A packaged app prefers its bundled standard Node.js runtime; a source checkout uses ordinary `node`, `pnpm`, and `python3` installations on the user's system.
 
@@ -148,6 +150,7 @@ Local development-tool configuration and generated working notes are excluded by
 - The browser sends API requests only to the dashboard's own loopback origin. The dashboard rejects invalid hosts, origins, and cross-site browser requests, then forwards accepted calls to the private runner with a random token read from its private local data directory. The runner independently validates its exact local Origin, Host, and rotating token. The browser, page URL, bookmarks, and Web Storage never receive that token.
 - Saved Start, Setup, Stop, and Restart commands are arbitrary shell commands. Only run commands you understand and trust. Setup runs before Start and Restart; Stop runs before Control Module's managed process-group shutdown; a saved Restart command is used in place of Start after the old host closes.
 - Basic-mode commands are generated locally, shown before saving, and do not run until you press Start. Selecting a package script means trusting that script and its installed dependencies.
+- Browser-tab refresh uses macOS Automation only after you press Restart. It is restricted to open Safari and Chromium-family tabs on the saved project's local port and never reads page content.
 - Control Module is not a sandbox, container, permissions boundary, remote administration panel, or multi-user service.
 - A project command can still read or change anything the current macOS user can access. Review commands before starting them.
 - Do not expose either port through a reverse proxy, tunnel, router, public server, or port-forwarding rule.

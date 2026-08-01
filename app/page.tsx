@@ -1,16 +1,41 @@
 "use client";
 
-import type { FormEvent, KeyboardEvent as ReactKeyboardEvent } from "react";
+import type { ChangeEvent, DragEvent as ReactDragEvent, FormEvent, KeyboardEvent as ReactKeyboardEvent } from "react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 type Host = "localhost" | "127.0.0.1";
 type Theme = "light" | "dark";
 type ToastKind = "success" | "error" | "info";
 type StatusFilter = "all" | "running" | "stopped";
-type SortBy = "updated" | "name" | "port";
+type SortBy = "manual" | "updated" | "name" | "port";
 type SortOrder = "ascending" | "descending";
 type ProjectView = "list" | "cards";
 type ThemeEditorLevel = "basic" | "advanced";
+type ProjectFormMode = "basic" | "advanced";
+type BasicProjectKind = "auto" | "static" | "vite" | "next" | "package";
+type ProcessCommandKind = "setup" | "start" | "stop" | "restart";
+type ProjectInspectionState = "idle" | "checking" | "ready" | "error";
+
+type PortableProject = {
+  name: string;
+  port: number;
+  command: string;
+  setupCommand: string;
+  stopCommand: string;
+  restartCommand: string;
+};
+
+type ProjectImportIssue = {
+  index: number;
+  name: string;
+  reason: string;
+};
+
+type ProjectImportPreview = {
+  fileName: string;
+  projects: PortableProject[];
+  issues: ProjectImportIssue[];
+};
 
 type Project = {
   id: string;
@@ -18,6 +43,9 @@ type Project = {
   host: Host;
   port: number;
   command: string;
+  setupCommand?: string;
+  stopCommand?: string;
+  restartCommand?: string;
   createdAt: number;
   updatedAt: number;
   running: boolean;
@@ -25,6 +53,28 @@ type Project = {
   lastLog?: string;
   stopReason?: string;
 };
+
+type ProjectDropTarget = {
+  id: string;
+  position: "before" | "after";
+};
+
+function reorderProjectList(
+  items: Project[],
+  sourceId: string,
+  targetId: string,
+  position: ProjectDropTarget["position"],
+) {
+  if (sourceId === targetId) return null;
+  const source = items.find((item) => item.id === sourceId);
+  if (!source) return null;
+  const withoutSource = items.filter((item) => item.id !== sourceId);
+  const targetIndex = withoutSource.findIndex((item) => item.id === targetId);
+  if (targetIndex < 0) return null;
+  const insertAt = position === "before" ? targetIndex : targetIndex + 1;
+  withoutSource.splice(insertAt, 0, source);
+  return withoutSource;
+}
 
 type Toast = {
   id: string;
@@ -48,15 +98,24 @@ type PortFeedback = {
   message: string;
 };
 
-type AddProjectDraft = {
-  name: string;
-  port: string;
+type BasicProjectInspection = {
+  path: string;
+  suggestedName: string;
+  detectedKind: "static" | "vite" | "next" | "package" | "unknown";
+  detectedLabel: string;
+  selectedKind: Exclude<BasicProjectKind, "auto"> | "unknown";
+  selectedLabel: string;
+  availableKinds: Array<{ value: Exclude<BasicProjectKind, "auto">; label: string }>;
+  scripts: string[];
+  selectedScript: string;
+  packageManager: string;
   command: string;
-  isEditingFormCommand: boolean;
-  suggestedPort: number | null;
-  portFeedback: PortFeedback | null;
-  error: string;
-  syncedCommandPort: number | null;
+  message: string;
+};
+
+type FolderSelection = {
+  cancelled: boolean;
+  path?: string;
 };
 
 type StopAllResult = {
@@ -131,6 +190,42 @@ const SCROLL_POSITION_KEY = "control-module-scroll-position";
 const PRIMARY_HOST: Host = "127.0.0.1";
 const ACTION_RATE_LIMIT_MS = 1000;
 const DEFAULT_THEME_ID = "default";
+const PROJECT_TRANSFER_FORMAT = "control-module-projects";
+const PROJECT_TRANSFER_VERSION = 1;
+const MAX_TRANSFER_FILE_BYTES = 1024 * 1024;
+const MAX_TRANSFER_PROJECTS = 100;
+const BROWSER_BLOCKED_PORT_ROWS = [
+  { port: 1719, reason: "Browser blocked · H.323" },
+  { port: 1720, reason: "Browser blocked · H.323" },
+  { port: 1723, reason: "Browser blocked · PPTP" },
+  { port: 2049, reason: "Browser blocked · NFS" },
+  { port: 3659, reason: "Browser blocked · Apple Password Server" },
+  { port: 4045, reason: "Browser blocked · lock daemon" },
+  { port: 5060, reason: "Browser blocked · SIP" },
+  { port: 5061, reason: "Browser blocked · SIP over TLS" },
+  { port: 6000, reason: "Browser blocked · X11" },
+  { port: 6566, reason: "Browser blocked · scanner service" },
+  { port: 6665, reason: "Browser blocked · IRC" },
+  { port: 6666, reason: "Browser blocked · IRC" },
+  { port: 6667, reason: "Browser blocked · IRC" },
+  { port: 6668, reason: "Browser blocked · IRC" },
+  { port: 6669, reason: "Browser blocked · IRC" },
+  { port: 6697, reason: "Browser blocked · IRC over TLS" },
+] as const;
+const BROWSER_BLOCKED_PROJECT_PORTS = new Set<number>(
+  BROWSER_BLOCKED_PORT_ROWS.map((item) => item.port),
+);
+const BLOCKED_PORT_ROWS = [
+  { port: "0–1024", reason: "System-reserved" },
+  { port: "1025", reason: "Control Module" },
+  ...BROWSER_BLOCKED_PORT_ROWS.flatMap((item) => {
+    if (item.port === 6665) {
+      return [{ port: "6665–6669", reason: item.reason }];
+    }
+    if (item.port >= 6666 && item.port <= 6669) return [];
+    return [{ port: String(item.port), reason: item.reason }];
+  }),
+];
 const DEFAULT_SELECTED_THEMES: SelectedThemeIds = {
   light: DEFAULT_THEME_ID,
   dark: DEFAULT_THEME_ID,
@@ -620,6 +715,77 @@ function commandHasPort(command: string, port: number) {
   return new RegExp(`\\b${port}\\b`).test(command);
 }
 
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function parseProjectTransfer(text: string, fileName: string): ProjectImportPreview {
+  let payload: unknown;
+  try {
+    payload = JSON.parse(text);
+  } catch {
+    throw new Error("This is not valid JSON. Choose a Control Module export file.");
+  }
+  if (!isPlainRecord(payload)
+    || payload.format !== PROJECT_TRANSFER_FORMAT
+    || payload.version !== PROJECT_TRANSFER_VERSION
+    || !Array.isArray(payload.projects)) {
+    throw new Error("This file is not a supported Control Module project export.");
+  }
+  if (payload.projects.length === 0) {
+    throw new Error("This export contains no projects.");
+  }
+  if (payload.projects.length > MAX_TRANSFER_PROJECTS) {
+    throw new Error(`Import up to ${MAX_TRANSFER_PROJECTS} projects at a time.`);
+  }
+
+  const projects: PortableProject[] = [];
+  const issues: ProjectImportIssue[] = [];
+  const seenPorts = new Set<number>();
+  payload.projects.forEach((candidate, index) => {
+    const fallbackName = `Project ${index + 1}`;
+    if (!isPlainRecord(candidate)) {
+      issues.push({ index, name: fallbackName, reason: "Project data must be an object." });
+      return;
+    }
+
+    const name = typeof candidate.name === "string" ? candidate.name.trim() : "";
+    const port = typeof candidate.port === "number" ? candidate.port : Number.NaN;
+    const command = typeof candidate.command === "string" ? candidate.command.trim() : "";
+    const setupCommand = typeof candidate.setupCommand === "string" ? candidate.setupCommand.trim() : "";
+    const stopCommand = typeof candidate.stopCommand === "string" ? candidate.stopCommand.trim() : "";
+    const restartCommand = typeof candidate.restartCommand === "string" ? candidate.restartCommand.trim() : "";
+    const displayName = name || fallbackName;
+    let reason = "";
+
+    if (!name || name.length > 48) reason = "Name must contain 1–48 characters.";
+    else if (!Number.isInteger(port) || port < 1026 || port > 9999) {
+      reason = "Port must be from 1026 to 9999.";
+    } else if (BROWSER_BLOCKED_PROJECT_PORTS.has(port)) {
+      reason = `Port ${port} is blocked by browsers.`;
+    } else if (seenPorts.has(port)) {
+      reason = `Port ${port} is duplicated in this file.`;
+    } else if (!command || command.length > 4096) {
+      reason = "Start command must contain 1–4,096 characters.";
+    } else if (!commandHasPort(command, port)) {
+      reason = `Start command must include port ${port}.`;
+    } else if ([setupCommand, stopCommand, restartCommand].some((value) => value.length > 2048)) {
+      reason = "Optional commands must each stay under 2,048 characters.";
+    } else if (restartCommand && !commandHasPort(restartCommand, port)) {
+      reason = `Restart command must include port ${port}.`;
+    }
+
+    if (reason) {
+      issues.push({ index, name: displayName, reason });
+      return;
+    }
+    seenPorts.add(port);
+    projects.push({ name, port, command, setupCommand, stopCommand, restartCommand });
+  });
+
+  return { fileName, projects, issues };
+}
+
 function getLocalAddressLabel(port: number | string) {
   return `localhost:${port} & 127.0.0.1:${port}`;
 }
@@ -796,6 +962,10 @@ export default function Home() {
   const [name, setName] = useState("");
   const [port, setPort] = useState("");
   const [command, setCommand] = useState("");
+  const [setupCommand, setSetupCommand] = useState("");
+  const [stopCommand, setStopCommand] = useState("");
+  const [restartCommand, setRestartCommand] = useState("");
+  const [activeProcessCommand, setActiveProcessCommand] = useState<ProcessCommandKind>("start");
   const [editingId, setEditingId] = useState<string | null>(null);
   const [isEditingName, setIsEditingName] = useState(false);
   const [isEditingFormCommand, setIsEditingFormCommand] = useState(true);
@@ -823,15 +993,34 @@ export default function Home() {
   const [systemSettingsLoading, setSystemSettingsLoading] = useState(false);
   const [nativeAppPrompt, setNativeAppPrompt] = useState<NativeAppPrompt | null>(null);
   const [nativeAppOpening, setNativeAppOpening] = useState(false);
+  const [transferMenuOpen, setTransferMenuOpen] = useState(false);
+  const [importPreview, setImportPreview] = useState<ProjectImportPreview | null>(null);
+  const [isImportingProjects, setIsImportingProjects] = useState(false);
+  const [importProgress, setImportProgress] = useState(0);
   const [error, setError] = useState("");
   const [portFeedback, setPortFeedback] = useState<PortFeedback | null>(null);
   const [suggestedPort, setSuggestedPort] = useState<number | null>(null);
   const [visibleCommands, setVisibleCommands] = useState<Record<string, boolean>>({});
+  const [dismissedProjectErrors, setDismissedProjectErrors] = useState<Record<string, string>>({});
+  const [draggingProjectId, setDraggingProjectId] = useState<string | null>(null);
+  const [projectDropTarget, setProjectDropTarget] = useState<ProjectDropTarget | null>(null);
+  const [isReorderingProjects, setIsReorderingProjects] = useState(false);
+  const [reorderAnnouncement, setReorderAnnouncement] = useState("");
   const [portSearch, setPortSearch] = useState("");
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [projectInfoId, setProjectInfoId] = useState<string | null>(null);
+  const [addProjectOpen, setAddProjectOpen] = useState(false);
+  const [projectFormMode, setProjectFormMode] = useState<ProjectFormMode>("basic");
+  const [projectFolder, setProjectFolder] = useState("");
+  const [basicProjectKind, setBasicProjectKind] = useState<BasicProjectKind>("auto");
+  const [basicProjectScript, setBasicProjectScript] = useState("");
+  const [projectInspection, setProjectInspection] = useState<BasicProjectInspection | null>(null);
+  const [projectInspectionState, setProjectInspectionState] = useState<ProjectInspectionState>("idle");
+  const [projectInspectionMessage, setProjectInspectionMessage] = useState("");
+  const [projectInspectionRefresh, setProjectInspectionRefresh] = useState(0);
+  const [folderPickerBusy, setFolderPickerBusy] = useState(false);
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
-  const [sortBy, setSortBy] = useState<SortBy>("updated");
+  const [sortBy, setSortBy] = useState<SortBy>("manual");
   const [sortOrder, setSortOrder] = useState<SortOrder>("descending");
   const [projectView, setProjectView] = useState<ProjectView>("list");
   const [selectionMode, setSelectionMode] = useState(false);
@@ -846,9 +1035,13 @@ export default function Home() {
   const expectedStops = useRef<Set<string>>(new Set());
   const runnerWasOnline = useRef<boolean | null>(null);
   const filterMenuRef = useRef<HTMLDivElement>(null);
+  const transferMenuRef = useRef<HTMLDivElement>(null);
+  const importFileInputRef = useRef<HTMLInputElement>(null);
+  const portSearchRef = useRef<HTMLInputElement>(null);
   const portCheckSequence = useRef(0);
+  const projectInspectionSequence = useRef(0);
+  const suggestedProjectName = useRef("");
   const syncedCommandPort = useRef<number | null>(null);
-  const suspendedAddDraft = useRef<AddProjectDraft | null>(null);
   const projectWindows = useRef<Record<string, Window | null>>({});
   const restartTriggerRef = useRef<HTMLButtonElement | null>(null);
   const lastActionAt = useRef(0);
@@ -863,38 +1056,32 @@ export default function Home() {
     : null;
   const editingProjectIsRunning = Boolean(editingProject?.running);
   const numericPort = Number(port);
-  const validPort = /^\d{4}$/.test(port) && numericPort >= 1026 && numericPort <= 9999;
+  const portWithinRange = /^\d{4}$/.test(port) && numericPort >= 1026 && numericPort <= 9999;
+  const browserBlockedPort = BROWSER_BLOCKED_PROJECT_PORTS.has(numericPort);
+  const validPort = portWithinRange && !browserBlockedPort;
   const commandPortSynced = validPort
     && Boolean(command.trim())
     && commandHasPort(command, numericPort);
+  const restartCommandPortSynced = !restartCommand.trim()
+    || (validPort && commandHasPort(restartCommand, numericPort));
   const commandPortMismatch = validPort && Boolean(command.trim()) && !commandPortSynced;
-  const addDraft = editingId && suspendedAddDraft.current
-    ? suspendedAddDraft.current
-    : {
-        name,
-        port,
-        command,
-        isEditingFormCommand,
-        suggestedPort,
-        portFeedback,
-        error,
-        syncedCommandPort: syncedCommandPort.current,
-      };
-  const addNumericPort = Number(addDraft.port);
-  const addValidPort = /^\d{4}$/.test(addDraft.port)
-    && addNumericPort >= 1026
-    && addNumericPort <= 9999;
-  const addCommandPortSynced = addValidPort
-    && Boolean(addDraft.command.trim())
-    && commandHasPort(addDraft.command, addNumericPort);
   const portConfirmedAvailable = portFeedback?.kind === "success" && suggestedPort === null;
+  const addBasicMode = addProjectOpen && !editingId && projectFormMode === "basic";
+  const basicProjectReady = !addBasicMode || Boolean(
+    projectFolder.trim()
+      && projectInspectionState === "ready"
+      && projectInspection?.command
+      && projectInspection.command === command,
+  );
   const formFieldsComplete = Boolean(name.trim() && port && command.trim());
   const canSubmitProject = editingProjectIsRunning
     ? Boolean(name.trim() && runnerOnline && !actionCooldownActive)
     : formFieldsComplete
       && validPort
       && commandPortSynced
+      && restartCommandPortSynced
       && portConfirmedAvailable
+      && basicProjectReady
       && runnerOnline
       && !actionCooldownActive;
   const submitDisabledReason = !name.trim()
@@ -908,11 +1095,23 @@ export default function Home() {
       : !port
       ? "Enter a port."
       : !validPort
-        ? "Use a port from 1026 to 9999."
+        ? browserBlockedPort
+          ? `Port ${numericPort} is blocked by browsers. Choose another port.`
+          : "Use a port from 1026 to 9999."
+        : addBasicMode && !projectFolder.trim()
+          ? "Choose a project folder or enter its path."
+          : addBasicMode && projectInspectionState === "checking"
+            ? "Wait while the project folder is checked."
+            : addBasicMode && projectInspectionState === "error"
+              ? projectInspectionMessage || "Choose a supported project type or use Advanced."
+              : addBasicMode && !basicProjectReady
+                ? "Choose a supported project type or use Advanced."
         : !command.trim()
           ? "Enter a command."
-          : !commandPortSynced
+        : !commandPortSynced
             ? `The command must include port ${numericPort}.`
+            : !restartCommandPortSynced
+              ? `The restart command must include port ${numericPort}.`
             : portFeedback?.kind === "checking"
               ? "Wait for the port check to finish."
               : !portConfirmedAvailable
@@ -1120,14 +1319,15 @@ export default function Home() {
   }, []);
 
   const modalDialogOpen = Boolean(
-    projectToDelete
+    addProjectOpen
+      || projectToDelete
       || stopAllOpen
-      || projectInfoId
       || editingId
       || themeEditorOpen
       || restartPromptProject
       || appSettingsOpen
-      || nativeAppPrompt,
+      || nativeAppPrompt
+      || importPreview,
   );
 
   useEffect(() => {
@@ -1248,13 +1448,14 @@ export default function Home() {
   }, [loadProjects]);
 
   useEffect(() => {
-    if (!projectToDelete && !stopAllOpen && !filtersOpen && !projectInfoId && !editingId && !themeEditorOpen && !restartPromptProject && !appSettingsOpen && !nativeAppPrompt) return;
+    if (!addProjectOpen && !projectToDelete && !stopAllOpen && !filtersOpen && !projectInfoId && !editingId && !themeEditorOpen && !restartPromptProject && !appSettingsOpen && !nativeAppPrompt && !transferMenuOpen && !importPreview) return;
     function closeOnEscape(event: KeyboardEvent) {
       if (event.key === "Escape") {
         setProjectToDelete(null);
         setDeleteConfirmation("");
         if (!isStoppingAll) setStopAllOpen(false);
         setFiltersOpen(false);
+        setTransferMenuOpen(false);
         setProjectInfoId(null);
         setThemeEditorOpen(false);
         setConfirmThemeDelete(false);
@@ -1267,12 +1468,36 @@ export default function Home() {
           setRestartPromptProject(null);
           window.requestAnimationFrame(() => restartTriggerRef.current?.focus());
         }
+        if (addProjectOpen) {
+          setAddProjectOpen(false);
+          resetForm();
+        }
         if (editingId) resetForm();
+        if (importPreview && !isImportingProjects) setImportPreview(null);
       }
     }
     window.addEventListener("keydown", closeOnEscape);
     return () => window.removeEventListener("keydown", closeOnEscape);
-  }, [appSettingsOpen, editingId, filtersOpen, isStoppingAll, nativeAppOpening, nativeAppPrompt, projectInfoId, projectToDelete, restartPromptProject, stopAllOpen, themeEditorOpen]);
+  }, [addProjectOpen, appSettingsOpen, editingId, filtersOpen, importPreview, isImportingProjects, isStoppingAll, nativeAppOpening, nativeAppPrompt, projectInfoId, projectToDelete, restartPromptProject, stopAllOpen, themeEditorOpen, transferMenuOpen]);
+
+  useEffect(() => {
+    function handleDesktopShortcut(event: KeyboardEvent) {
+      if (modalDialogOpen || filtersOpen || projectInfoId || event.metaKey || event.ctrlKey || event.altKey) return;
+      const target = event.target;
+      if (target instanceof Element && target.closest("input, textarea, select, button, a, [contenteditable='true']")) return;
+
+      if (event.key === "/") {
+        event.preventDefault();
+        portSearchRef.current?.focus();
+      } else if (event.key.toLowerCase() === "n" && runnerOnline) {
+        event.preventDefault();
+        openAddProject();
+      }
+    }
+
+    window.addEventListener("keydown", handleDesktopShortcut);
+    return () => window.removeEventListener("keydown", handleDesktopShortcut);
+  }, [filtersOpen, modalDialogOpen, projectInfoId, runnerOnline]);
 
   useEffect(() => {
     if (!filtersOpen) return;
@@ -1282,6 +1507,15 @@ export default function Home() {
     document.addEventListener("pointerdown", closeFiltersOutside);
     return () => document.removeEventListener("pointerdown", closeFiltersOutside);
   }, [filtersOpen]);
+
+  useEffect(() => {
+    if (!transferMenuOpen) return;
+    function closeTransferOutside(event: PointerEvent) {
+      if (!transferMenuRef.current?.contains(event.target as Node)) setTransferMenuOpen(false);
+    }
+    document.addEventListener("pointerdown", closeTransferOutside);
+    return () => document.removeEventListener("pointerdown", closeTransferOutside);
+  }, [transferMenuOpen]);
 
   useEffect(() => {
     if (!projectInfoId) return;
@@ -1309,9 +1543,11 @@ export default function Home() {
     }
 
     if (!validPort) {
-      const message = /^\d+$/.test(port) && numericPort < 1026
-        ? `Port ${numericPort} is reserved. Use 1026–9999.`
-        : "Enter a four-digit port from 1026 to 9999.";
+      const message = browserBlockedPort
+        ? `Port ${numericPort} is blocked by browsers. Choose another port.`
+        : /^\d+$/.test(port) && numericPort < 1026
+          ? `Port ${numericPort} is reserved. Use 1026–9999.`
+          : "Enter a four-digit port from 1026 to 9999.";
       setPortFeedback({ kind: "error", message });
       return;
     }
@@ -1353,9 +1589,72 @@ export default function Home() {
     }, 350);
 
     return () => window.clearTimeout(timer);
-  }, [editingId, editingProjectIsRunning, numericPort, port, validPort]);
+  }, [browserBlockedPort, editingId, editingProjectIsRunning, numericPort, port, validPort]);
+
+  useEffect(() => {
+    const inspectionId = ++projectInspectionSequence.current;
+    if (!addProjectOpen || projectFormMode !== "basic") return;
+
+    setProjectInspection(null);
+    if (!projectFolder.trim()) {
+      setProjectInspectionState("idle");
+      setProjectInspectionMessage("");
+      setCommand("");
+      syncedCommandPort.current = null;
+      return;
+    }
+    if (!validPort) {
+      setProjectInspectionState(browserBlockedPort ? "error" : "idle");
+      setProjectInspectionMessage(browserBlockedPort
+        ? `Port ${numericPort} is blocked by browsers. Choose another port.`
+        : "Enter a valid port to generate the command.");
+      setCommand("");
+      syncedCommandPort.current = null;
+      return;
+    }
+
+    setProjectInspectionState("checking");
+    setProjectInspectionMessage("Checking the selected folder…");
+    setCommand("");
+    syncedCommandPort.current = null;
+    const timer = window.setTimeout(async () => {
+      try {
+        const inspection = await apiRequest<BasicProjectInspection>("/api/projects/inspect", {
+          method: "POST",
+          body: JSON.stringify({
+            path: projectFolder.trim(),
+            port: numericPort,
+            kind: basicProjectKind,
+            script: basicProjectScript || undefined,
+          }),
+        });
+        if (inspectionId !== projectInspectionSequence.current) return;
+        setProjectInspection(inspection);
+        setBasicProjectScript(inspection.selectedScript);
+        setName((current) => {
+          const shouldReplace = !current.trim() || current === suggestedProjectName.current;
+          suggestedProjectName.current = inspection.suggestedName;
+          return shouldReplace ? inspection.suggestedName : current;
+        });
+        setCommand(inspection.command);
+        syncedCommandPort.current = inspection.command ? numericPort : null;
+        setProjectInspectionState(inspection.command ? "ready" : "error");
+        setProjectInspectionMessage(inspection.message);
+      } catch (requestError) {
+        if (inspectionId !== projectInspectionSequence.current) return;
+        setProjectInspection(null);
+        setCommand("");
+        syncedCommandPort.current = null;
+        setProjectInspectionState("error");
+        setProjectInspectionMessage(getErrorMessage(requestError, "The project folder could not be checked."));
+      }
+    }, 350);
+
+    return () => window.clearTimeout(timer);
+  }, [addProjectOpen, basicProjectKind, basicProjectScript, browserBlockedPort, numericPort, projectFolder, projectFormMode, projectInspectionRefresh, validPort]);
 
   const sortedProjects = useMemo(() => {
+    if (sortBy === "manual") return projects;
     return [...projects].sort((a, b) => {
       let comparison = 0;
       if (sortBy === "name") comparison = a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
@@ -1377,12 +1676,36 @@ export default function Home() {
 
   const selectedProjects = projects.filter((project) => selectedProjectIds[project.id]);
   const selectedCount = selectedProjects.length;
+  const allVisibleProjectsSelected = filteredProjects.length > 0
+    && filteredProjects.every((project) => selectedProjectIds[project.id]);
   const batchProjects = selectionMode ? selectedProjects : projects;
   const startableCount = batchProjects.filter((project) => !project.running).length;
   const stoppableCount = batchProjects.filter((project) => project.running).length;
   const activeFilterCount = Number(statusFilter !== "all")
-    + Number(sortBy !== "updated" || sortOrder !== "descending");
+    + Number(sortBy !== "manual");
   const hasProjectFilters = Boolean(portSearch || activeFilterCount);
+  const canReorderProjects = runnerOnline
+    && projects.length > 1
+    && sortBy === "manual"
+    && !portSearch
+    && statusFilter === "all"
+    && !selectionMode
+    && !isReorderingProjects
+    && !isStartingAll
+    && !isStoppingAll
+    && !busyId
+    && !actionCooldownActive;
+  const reorderDisabledReason = projects.length < 2
+    ? "Add another project to change the order"
+    : selectionMode
+      ? "Finish selecting projects before reordering"
+      : sortBy !== "manual" || portSearch || statusFilter !== "all"
+        ? "Clear search and filters, then choose Manual order"
+        : isReorderingProjects
+          ? "Saving the project order"
+          : busyId || actionCooldownActive || isStartingAll || isStoppingAll
+            ? "Wait for the current project action to finish"
+            : "Project order is temporarily unavailable";
 
   const themeEditorThemes = customThemes.filter((item) => item.mode === themeEditorMode);
   const basicThemeChoices = [
@@ -1454,6 +1777,139 @@ export default function Home() {
 
   function closeAppSettings() {
     setAppSettingsOpen(false);
+  }
+
+  function exportProjects() {
+    setTransferMenuOpen(false);
+    if (projects.length === 0) {
+      notify("info", "Nothing to export", "Add a project before creating an export file.");
+      return;
+    }
+    const payload = {
+      format: PROJECT_TRANSFER_FORMAT,
+      version: PROJECT_TRANSFER_VERSION,
+      exportedAt: new Date().toISOString(),
+      projects: projects.map((project) => ({
+        name: project.name,
+        port: project.port,
+        command: project.command,
+        setupCommand: project.setupCommand || "",
+        stopCommand: project.stopCommand || "",
+        restartCommand: project.restartCommand || "",
+      })),
+    };
+    const blob = new Blob([`${JSON.stringify(payload, null, 2)}\n`], {
+      type: "application/json;charset=utf-8",
+    });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `control-module-projects-${new Date().toISOString().slice(0, 10)}.json`;
+    document.body.append(link);
+    link.click();
+    link.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 0);
+    notify(
+      "success",
+      "Projects exported",
+      `${projects.length} ${projects.length === 1 ? "project" : "projects"} saved to JSON. Keep the file private.`,
+    );
+  }
+
+  function chooseImportFile() {
+    setTransferMenuOpen(false);
+    window.requestAnimationFrame(() => importFileInputRef.current?.click());
+  }
+
+  async function readImportFile(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    if (file.size > MAX_TRANSFER_FILE_BYTES) {
+      notify("error", "Import file is too large", "Choose a JSON export smaller than 1 MB.");
+      return;
+    }
+    try {
+      const preview = parseProjectTransfer(await file.text(), file.name);
+      setImportProgress(0);
+      setImportPreview(preview);
+    } catch (importError) {
+      notify(
+        "error",
+        "Import file could not be read",
+        getErrorMessage(importError, "Choose a valid Control Module project export."),
+      );
+    }
+  }
+
+  function closeImportPreview() {
+    if (isImportingProjects) return;
+    setImportPreview(null);
+    setImportProgress(0);
+  }
+
+  async function importProjects() {
+    if (!importPreview || isImportingProjects || importPreview.projects.length === 0) return;
+    if (!beginRateLimitedAction()) return;
+
+    const preview = importPreview;
+    const skipped = preview.issues.map((issue) => `${issue.name}: ${issue.reason}`);
+    let importedCount = 0;
+    setIsImportingProjects(true);
+    setImportProgress(0);
+    try {
+      for (let index = 0; index < preview.projects.length; index += 1) {
+        const project = preview.projects[index];
+        setImportProgress(index + 1);
+        try {
+          const availability = await apiRequest<PortAvailability>("/api/ports/check", {
+            method: "POST",
+            body: JSON.stringify({ host: PRIMARY_HOST, port: project.port }),
+          });
+          if (!availability.available) {
+            skipped.push(`${project.name}: ${availability.reason || `Port ${project.port} is unavailable.`}`);
+            continue;
+          }
+          await apiRequest("/api/projects/save", {
+            method: "POST",
+            body: JSON.stringify({
+              id: crypto.randomUUID(),
+              name: project.name,
+              host: PRIMARY_HOST,
+              port: project.port,
+              command: project.command,
+              setupCommand: project.setupCommand,
+              stopCommand: project.stopCommand,
+              restartCommand: project.restartCommand,
+            }),
+          });
+          importedCount += 1;
+        } catch (requestError) {
+          const detail = getErrorMessage(requestError, "The project could not be imported.");
+          skipped.push(`${project.name}: ${detail}`);
+          if (detail.includes("runner is offline")) break;
+        }
+      }
+      await loadProjects();
+      setImportPreview(null);
+      if (importedCount > 0) {
+        notify(
+          "success",
+          "Projects imported",
+          `${importedCount} ${importedCount === 1 ? "project" : "projects"} saved. Nothing was started.`,
+        );
+      }
+      if (skipped.length > 0) {
+        notify(
+          "error",
+          `${skipped.length} ${skipped.length === 1 ? "project was" : "projects were"} skipped`,
+          skipped.slice(0, 3).join(" ") + (skipped.length > 3 ? " Review the export for additional issues." : ""),
+        );
+      }
+    } finally {
+      setIsImportingProjects(false);
+      setImportProgress(0);
+    }
   }
 
   function openThemeEditorFromSettings() {
@@ -1628,6 +2084,9 @@ export default function Home() {
       syncedCommandPort.current = newPort;
       return updated;
     });
+    setSetupCommand((current) => replaceCommandPort(current, oldPort, newPort));
+    setStopCommand((current) => replaceCommandPort(current, oldPort, newPort));
+    setRestartCommand((current) => replaceCommandPort(current, oldPort, newPort));
     setSuggestedPort(null);
     setPortFeedback({
       kind: "checking",
@@ -1637,19 +2096,32 @@ export default function Home() {
   }
 
   function resetForm() {
-    const restoredDraft = editingId ? suspendedAddDraft.current : null;
     portCheckSequence.current += 1;
-    syncedCommandPort.current = restoredDraft?.syncedCommandPort ?? null;
-    setName(restoredDraft?.name ?? "");
-    setPort(restoredDraft?.port ?? "");
-    setCommand(restoredDraft?.command ?? "");
+    projectInspectionSequence.current += 1;
+    suggestedProjectName.current = "";
+    syncedCommandPort.current = null;
+    setName("");
+    setPort("");
+    setCommand("");
+    setSetupCommand("");
+    setStopCommand("");
+    setRestartCommand("");
+    setActiveProcessCommand("start");
     setEditingId(null);
+    setProjectFormMode("basic");
+    setProjectFolder("");
+    setBasicProjectKind("auto");
+    setBasicProjectScript("");
+    setProjectInspection(null);
+    setProjectInspectionState("idle");
+    setProjectInspectionMessage("");
+    setProjectInspectionRefresh(0);
+    setFolderPickerBusy(false);
     setIsEditingName(false);
-    setIsEditingFormCommand(restoredDraft?.isEditingFormCommand ?? true);
-    setSuggestedPort(restoredDraft?.suggestedPort ?? null);
-    setPortFeedback(restoredDraft?.portFeedback ?? null);
-    setError(restoredDraft?.error ?? "");
-    suspendedAddDraft.current = null;
+    setIsEditingFormCommand(true);
+    setSuggestedPort(null);
+    setPortFeedback(null);
+    setError("");
   }
 
   function validate() {
@@ -1663,8 +2135,17 @@ export default function Home() {
       return true;
     }
     if (!validPort) {
-      setError("Enter a port from 1026 to 9999. Lower ports are reserved.");
-      notify("error", "Invalid port", "Use a port from 1026 to 9999.");
+      const detail = browserBlockedPort
+        ? `Port ${numericPort} is blocked by browsers. Choose another port.`
+        : "Enter a port from 1026 to 9999. Lower ports are reserved.";
+      setError(detail);
+      notify("error", "Invalid port", detail);
+      return false;
+    }
+    if (addBasicMode && !basicProjectReady) {
+      const detail = projectInspectionMessage || "Choose a supported project folder or use Advanced.";
+      setError(detail);
+      notify("error", "Project setup incomplete", detail);
       return false;
     }
     if (!command.trim()) {
@@ -1678,6 +2159,12 @@ export default function Home() {
       notify("error", "Port mismatch", detail);
       return false;
     }
+    if (restartCommand.trim() && !commandHasPort(restartCommand, numericPort)) {
+      const detail = `The restart command must include port ${numericPort} to match the Port field.`;
+      setError(detail);
+      notify("error", "Restart port mismatch", detail);
+      return false;
+    }
     if (!portConfirmedAvailable) {
       const detail = portFeedback?.kind === "checking"
         ? "Wait for the port availability check to finish."
@@ -1689,6 +2176,11 @@ export default function Home() {
     if (command.length > 4096) {
       setError("The command is too long.");
       notify("error", "Command too long", "Keep it under 4,096 characters.");
+      return false;
+    }
+    if ([setupCommand, stopCommand, restartCommand].some((value) => value.length > 2048)) {
+      setError("Setup, stop, and restart commands must each stay under 2,048 characters.");
+      notify("error", "Process command too long", "Keep each optional command under 2,048 characters.");
       return false;
     }
     setError("");
@@ -1732,11 +2224,15 @@ export default function Home() {
           host: PRIMARY_HOST,
           port: selectedPort,
           command: selectedCommand,
+          setupCommand: setupCommand.trim(),
+          stopCommand: stopCommand.trim(),
+          restartCommand: restartCommand.trim(),
         }),
       });
       await loadProjects();
       const updated = Boolean(editingId);
       resetForm();
+      if (!updated) setAddProjectOpen(false);
       notify("success", updated ? "Project updated" : "Project saved", projectName);
     } catch (requestError) {
       const detail = getErrorMessage(requestError, "The project could not be saved.");
@@ -1746,22 +2242,18 @@ export default function Home() {
   }
 
   function editProject(project: Project) {
-    suspendedAddDraft.current = {
-      name,
-      port,
-      command,
-      isEditingFormCommand,
-      suggestedPort,
-      portFeedback,
-      error,
-      syncedCommandPort: syncedCommandPort.current,
-    };
     portCheckSequence.current += 1;
+    projectInspectionSequence.current += 1;
     syncedCommandPort.current = project.port;
     setName(project.name);
     setPort(String(project.port));
     setCommand(project.command);
+    setSetupCommand(project.setupCommand || "");
+    setStopCommand(project.stopCommand || "");
+    setRestartCommand(project.restartCommand || "");
+    setActiveProcessCommand("start");
     setEditingId(project.id);
+    setProjectFormMode("advanced");
     setIsEditingName(false);
     setIsEditingFormCommand(!project.command.trim());
     setSuggestedPort(null);
@@ -1854,6 +2346,12 @@ export default function Home() {
       return;
     }
     if (!beginRateLimitedAction()) return;
+    setDismissedProjectErrors((current) => {
+      if (!(project.id in current)) return current;
+      const next = { ...current };
+      delete next[project.id];
+      return next;
+    });
     setBusyId(project.id);
     setError("");
     try {
@@ -1946,9 +2444,147 @@ export default function Home() {
   function clearProjectFilters() {
     setPortSearch("");
     setStatusFilter("all");
-    setSortBy("updated");
+    setSortBy("manual");
     setSortOrder("descending");
     setFiltersOpen(false);
+  }
+
+  function dismissProjectError(project: Project) {
+    if (!project.lastLog) return;
+    setDismissedProjectErrors((current) => ({
+      ...current,
+      [project.id]: project.lastLog || "",
+    }));
+  }
+
+  async function persistProjectOrder(nextProjects: Project[], announcement: string) {
+    const previousProjects = projects;
+    setProjects(nextProjects);
+    setIsReorderingProjects(true);
+    setProjectInfoId(null);
+    setDraggingProjectId(null);
+    setProjectDropTarget(null);
+    try {
+      await apiRequest("/api/projects/reorder", {
+        method: "POST",
+        body: JSON.stringify({ ids: nextProjects.map((project) => project.id) }),
+      });
+      setReorderAnnouncement(announcement);
+    } catch (requestError) {
+      setProjects(previousProjects);
+      const detail = getErrorMessage(requestError, "The project order could not be saved.");
+      notify("error", "Could not reorder projects", detail);
+    } finally {
+      setIsReorderingProjects(false);
+    }
+  }
+
+  function moveProjectByKeyboard(project: Project, offset: -1 | 1) {
+    if (!canReorderProjects) return;
+    const currentIndex = projects.findIndex((item) => item.id === project.id);
+    const target = projects[currentIndex + offset];
+    if (!target) return;
+    const position = offset < 0 ? "before" : "after";
+    const nextProjects = reorderProjectList(projects, project.id, target.id, position);
+    if (!nextProjects) return;
+    void persistProjectOrder(
+      nextProjects,
+      `Moved ${project.name} ${position} ${target.name}.`,
+    );
+  }
+
+  function handleProjectDragStart(event: ReactDragEvent<HTMLButtonElement>, project: Project) {
+    if (!canReorderProjects) {
+      event.preventDefault();
+      return;
+    }
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", project.id);
+    setDraggingProjectId(project.id);
+    setProjectDropTarget(null);
+    setProjectInfoId(null);
+  }
+
+  function handleProjectDragOver(event: ReactDragEvent<HTMLElement>, targetId: string) {
+    if (!canReorderProjects || !draggingProjectId || draggingProjectId === targetId) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    const bounds = event.currentTarget.getBoundingClientRect();
+    const position = projectView === "cards"
+      ? event.clientX < bounds.left + (bounds.width / 2) ? "before" : "after"
+      : event.clientY < bounds.top + (bounds.height / 2) ? "before" : "after";
+    if (projectDropTarget?.id === targetId && projectDropTarget.position === position) return;
+    setProjectDropTarget({ id: targetId, position });
+  }
+
+  function handleProjectDrop(event: ReactDragEvent<HTMLElement>, target: Project) {
+    event.preventDefault();
+    if (!canReorderProjects) return;
+    const sourceId = draggingProjectId || event.dataTransfer.getData("text/plain");
+    const position = projectDropTarget?.id === target.id
+      ? projectDropTarget.position
+      : "before";
+    const source = projects.find((project) => project.id === sourceId);
+    const nextProjects = reorderProjectList(projects, sourceId, target.id, position);
+    setDraggingProjectId(null);
+    setProjectDropTarget(null);
+    if (!source || !nextProjects) return;
+    void persistProjectOrder(
+      nextProjects,
+      `Moved ${source.name} ${position} ${target.name}.`,
+    );
+  }
+
+  function finishProjectDrag() {
+    setDraggingProjectId(null);
+    setProjectDropTarget(null);
+  }
+
+  function openAddProject() {
+    if (!runnerOnline || editingId) return;
+    resetForm();
+    setFiltersOpen(false);
+    setProjectInfoId(null);
+    setAddProjectOpen(true);
+  }
+
+  function changeProjectFormMode(nextMode: ProjectFormMode) {
+    projectInspectionSequence.current += 1;
+    setProjectFormMode(nextMode);
+    setError("");
+    if (nextMode === "advanced") {
+      setProjectInspectionState("idle");
+      setProjectInspectionMessage("");
+      setIsEditingFormCommand(true);
+    }
+  }
+
+  async function browseForProjectFolder() {
+    if (folderPickerBusy || !beginRateLimitedAction()) return;
+    setFolderPickerBusy(true);
+    setError("");
+    try {
+      const selection = await apiRequest<FolderSelection>("/api/system/choose-folder", {
+        method: "POST",
+        body: JSON.stringify({}),
+      });
+      if (!selection.cancelled && selection.path) {
+        setProjectFolder(selection.path);
+        setBasicProjectKind("auto");
+        setBasicProjectScript("");
+      }
+    } catch (requestError) {
+      const detail = getErrorMessage(requestError, "The folder picker could not open. Enter the path instead.");
+      setError(detail);
+      notify("error", "Folder picker unavailable", detail);
+    } finally {
+      setFolderPickerBusy(false);
+    }
+  }
+
+  function closeAddProject() {
+    setAddProjectOpen(false);
+    resetForm();
   }
 
   function toggleSelectionMode() {
@@ -1961,6 +2597,17 @@ export default function Home() {
       ...current,
       [projectId]: !current[projectId],
     }));
+  }
+
+  function toggleVisibleProjectSelection() {
+    setSelectedProjectIds((current) => {
+      const next = { ...current };
+      filteredProjects.forEach((project) => {
+        if (allVisibleProjectsSelected) delete next[project.id];
+        else next[project.id] = true;
+      });
+      return next;
+    });
   }
 
   async function runAllProjects() {
@@ -2126,6 +2773,67 @@ export default function Home() {
   }
 
   function renderProjectForm() {
+    const availableBasicKinds = projectInspection?.availableKinds || [
+      { value: "static" as const, label: "Static files" },
+    ];
+    const basicKindOptions = [
+      { value: "auto" as const, label: "Auto-detect" },
+      ...availableBasicKinds,
+    ].filter((option, index, options) => (
+      options.findIndex((candidate) => candidate.value === option.value) === index
+    ));
+    const processCommands: Record<ProcessCommandKind, {
+      label: string;
+      description: string;
+      placeholder: string;
+      value: string;
+      required: boolean;
+    }> = {
+      setup: {
+        label: "Setup",
+        description: "Optional · runs before Start and Restart.",
+        placeholder: "cd /path/to/project && npm install",
+        value: setupCommand,
+        required: false,
+      },
+      start: {
+        label: "Start",
+        description: "Required · launches the managed local host.",
+        placeholder: "cd /path/to/project && python3 -m http.server 1234 --bind 127.0.0.1",
+        value: command,
+        required: true,
+      },
+      stop: {
+        label: "Stop",
+        description: "Optional · runs before Control Module safely stops the process group.",
+        placeholder: "cd /path/to/project && npm run stop",
+        value: stopCommand,
+        required: false,
+      },
+      restart: {
+        label: "Restart",
+        description: "Optional · launches after Stop instead of reusing Start.",
+        placeholder: "cd /path/to/project && npm run restart -- --port 1234",
+        value: restartCommand,
+        required: false,
+      },
+    };
+    const activeCommand = processCommands[activeProcessCommand];
+    const updateActiveProcessCommand = (nextValue: string) => {
+      if (activeProcessCommand === "setup") setSetupCommand(nextValue);
+      else if (activeProcessCommand === "start") setCommand(nextValue);
+      else if (activeProcessCommand === "stop") setStopCommand(nextValue);
+      else setRestartCommand(nextValue);
+      setError("");
+      if (
+        activeProcessCommand === "start"
+        && validPort
+        && commandHasPort(nextValue, numericPort)
+      ) {
+        syncedCommandPort.current = numericPort;
+      }
+    };
+
     return (
       <form className="project-form" onSubmit={saveProject} noValidate>
         {editingId ? (
@@ -2170,15 +2878,32 @@ export default function Home() {
               placeholder="Name of project"
               maxLength={48}
               autoComplete="off"
+              autoFocus
             />
           </div>
         )}
 
         <div className={`address-fields port-only${editingProjectIsRunning ? " form-field-locked" : ""}`}>
           <div className="field port-field">
-            <label htmlFor="edit-project-port">Port</label>
+            <div className="field-label-row">
+              <label htmlFor={`${editingId ? "edit" : "add"}-project-port`}>Port</label>
+              <details className="blocked-ports-disclosure">
+                <summary>Blocked ports</summary>
+                <div className="blocked-ports-menu">
+                  <p>These ports cannot be assigned to projects.</p>
+                  <ul>
+                    {BLOCKED_PORT_ROWS.map((item) => (
+                      <li key={item.port}>
+                        <code>{item.port}</code>
+                        <span>{item.reason}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              </details>
+            </div>
             <input
-              id="edit-project-port"
+              id={`${editingId ? "edit" : "add"}-project-port`}
               inputMode="numeric"
               pattern="[0-9]*"
               value={port}
@@ -2195,6 +2920,9 @@ export default function Home() {
                   && commandHasPort(command, trackedPort)
                 ) {
                   setCommand(replaceCommandPort(command, trackedPort, nextPortNumber));
+                  setSetupCommand((current) => replaceCommandPort(current, trackedPort, nextPortNumber));
+                  setStopCommand((current) => replaceCommandPort(current, trackedPort, nextPortNumber));
+                  setRestartCommand((current) => replaceCommandPort(current, trackedPort, nextPortNumber));
                   syncedCommandPort.current = nextPortNumber;
                 } else if (/^\d{4}$/.test(nextPort) && trackedPort === null) {
                   syncedCommandPort.current = nextPortNumber;
@@ -2218,96 +2946,293 @@ export default function Home() {
           </div>
         </div>
 
-        <div className={`field command-form-field${editingProjectIsRunning ? " form-field-locked" : ""}`}>
-          <div className="command-form-header">
-            <span>Command</span>
-            <div className="command-form-header-actions">
-              {command.trim() && !editingProjectIsRunning && (
-                <button
-                  className="command-edit-button"
-                  type="button"
-                  onClick={toggleFormCommandEditing}
-                  aria-expanded={isEditingFormCommand}
-                >
-                  {!isEditingFormCommand && <span className="action-icon edit-icon" aria-hidden="true" />}
-                  {isEditingFormCommand ? "Done" : "Edit"}
-                </button>
-              )}
+        {!editingId && (
+          <div className="project-setup-row">
+            <div className="project-setup-copy">
+              <strong>Launch method</strong>
+              <span>
+                {projectFormMode === "basic"
+                  ? "Choose a folder and let Control Module build the start command."
+                  : "Configure the project’s process commands yourself."}
+              </span>
+            </div>
+            <div className="project-form-mode" role="group" aria-label="Project setup mode">
+              <button
+                className={projectFormMode === "basic" ? "active" : ""}
+                type="button"
+                onClick={() => changeProjectFormMode("basic")}
+                aria-pressed={projectFormMode === "basic"}
+              >
+                Basic
+              </button>
+              <button
+                className={projectFormMode === "advanced" ? "active" : ""}
+                type="button"
+                onClick={() => changeProjectFormMode("advanced")}
+                aria-pressed={projectFormMode === "advanced"}
+              >
+                Advanced
+              </button>
             </div>
           </div>
-          {isEditingFormCommand || !command.trim() ? (
-            <textarea
-              id="edit-project-command"
-              className="command-editor"
-              value={command}
-              onChange={(event) => {
-                const nextCommand = event.target.value;
-                setCommand(nextCommand);
-                setError("");
-                if (validPort && commandHasPort(nextCommand, numericPort)) {
-                  syncedCommandPort.current = numericPort;
-                }
-              }}
-              onBlur={(event) => {
-                if (!command.trim()) return;
-                if (event.relatedTarget instanceof Element
-                  && event.relatedTarget.closest(".command-form-field")) return;
-                setIsEditingFormCommand(false);
-              }}
-              placeholder="the path to make your app run"
-              rows={1}
-              maxLength={4096}
-              spellCheck={false}
-              aria-label="Command"
-              aria-invalid={commandPortMismatch}
-              aria-describedby={editingProjectIsRunning ? "running-edit-note" : undefined}
-              disabled={editingProjectIsRunning}
-              autoFocus={Boolean(command) && !editingProjectIsRunning}
-            />
-          ) : (
-            <div
-              className="command-collapsed"
-              title={command}
-              aria-disabled={editingProjectIsRunning || undefined}
-              aria-describedby={editingProjectIsRunning ? "running-edit-note" : undefined}
-            >
-              <code>{command}</code>
+        )}
+
+        {addBasicMode ? (
+          <div className="basic-project-fields">
+            <div className="field project-folder-field">
+              <label htmlFor="add-project-folder">Project folder</label>
+              <div className="project-folder-control">
+                <input
+                  id="add-project-folder"
+                  value={projectFolder}
+                  onChange={(event) => {
+                    setProjectFolder(event.target.value);
+                    setBasicProjectKind("auto");
+                    setBasicProjectScript("");
+                    setError("");
+                  }}
+                  placeholder="/path/to/project"
+                  autoComplete="off"
+                  spellCheck={false}
+                  aria-invalid={projectInspectionState === "error"}
+                />
+                <button
+                  className="button project-folder-button"
+                  type="button"
+                  onClick={() => void browseForProjectFolder()}
+                  disabled={folderPickerBusy || actionCooldownActive}
+                >
+                  {folderPickerBusy ? "Opening…" : "Browse"}
+                </button>
+              </div>
             </div>
-          )}
-          {!editingProjectIsRunning && validPort && command.trim() && (
-            <span
-              className={`command-sync-feedback ${commandPortSynced ? "success" : "error"}`}
-              role="status"
-            >
-              {commandPortSynced
-                ? `Command matches port ${numericPort}.`
-                : `Command must include port ${numericPort} to match the Port field.`}
-            </span>
-          )}
-        </div>
 
-        {validPort && <code className="address-preview">{getLocalAddressLabel(numericPort)}</code>}
-        {error && <p className="form-error" role="alert">{error}</p>}
+            <div className="basic-project-options">
+              <div className="field">
+                <label htmlFor="basic-project-kind">Project type</label>
+                <select
+                  id="basic-project-kind"
+                  value={basicProjectKind}
+                  onChange={(event) => {
+                    setBasicProjectKind(event.target.value as BasicProjectKind);
+                    setBasicProjectScript("");
+                    setError("");
+                  }}
+                >
+                  {basicKindOptions.map((option) => (
+                    <option key={option.value} value={option.value}>{option.label}</option>
+                  ))}
+                </select>
+              </div>
+              {projectInspection && projectInspection.scripts.length > 1 && (
+                <div className="field">
+                  <label htmlFor="basic-project-script">Run script</label>
+                  <select
+                    id="basic-project-script"
+                    value={basicProjectScript}
+                    onChange={(event) => {
+                      setBasicProjectScript(event.target.value);
+                      setError("");
+                    }}
+                  >
+                    {projectInspection.scripts.map((script) => (
+                      <option key={script} value={script}>{script}</option>
+                    ))}
+                  </select>
+                </div>
+              )}
+            </div>
 
-        <div className="form-actions">
-          {editingId && <button className="button" type="button" onClick={resetForm}>Cancel</button>}
-          {suggestedPort !== null && (
+            {projectFolder.trim() && (
+              <section className={`project-inspection-panel ${projectInspectionState}`}>
+                <div className="project-inspection-header">
+                  <div>
+                    <strong>Auto-detect</strong>
+                    <span>{projectInspection?.selectedLabel || "Checking project"}</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setProjectInspectionRefresh((current) => current + 1)}
+                    disabled={projectInspectionState === "checking" || !validPort}
+                  >
+                    {projectInspectionState === "checking" ? "Detecting…" : "Detect again"}
+                  </button>
+                </div>
+                <p
+                  className={`project-inspection-status ${projectInspectionState}`}
+                  role="status"
+                  aria-live="polite"
+                >
+                  {projectInspectionMessage || "Enter a valid port to generate the command."}
+                </p>
+
+                {projectInspectionState === "ready" && command && (
+                  <div className="generated-command">
+                    <div>
+                      <span>Generated start command</span>
+                      <button type="button" onClick={() => changeProjectFormMode("advanced")}>
+                        Edit in Advanced
+                      </button>
+                    </div>
+                    <code>{command}</code>
+                  </div>
+                )}
+              </section>
+            )}
+          </div>
+        ) : (
+          <div className={`field command-form-field${editingProjectIsRunning ? " form-field-locked" : ""}`}>
+            <div className="command-form-header">
+              <div>
+                <span>Process commands</span>
+                <small>Start is required. Add the others only when your project needs them.</small>
+              </div>
+              {activeProcessCommand === "start" && command.trim() && !editingProjectIsRunning && (
+                <div className="command-form-header-actions">
+                  <button
+                    className="command-edit-button"
+                    type="button"
+                    onClick={toggleFormCommandEditing}
+                    aria-expanded={isEditingFormCommand}
+                  >
+                    {!isEditingFormCommand && <span className="action-icon edit-icon" aria-hidden="true" />}
+                    {isEditingFormCommand ? "Done" : "Edit"}
+                  </button>
+                </div>
+              )}
+            </div>
+            <div className="process-command-tabs" role="tablist" aria-label="Process command">
+              {(Object.keys(processCommands) as ProcessCommandKind[]).map((kind) => (
+                <button
+                  key={kind}
+                  className={activeProcessCommand === kind ? "active" : ""}
+                  type="button"
+                  role="tab"
+                  aria-selected={activeProcessCommand === kind}
+                  aria-controls="process-command-panel"
+                  onClick={() => setActiveProcessCommand(kind)}
+                >
+                  {processCommands[kind].label}
+                  {processCommands[kind].value.trim() && (
+                    <span className="process-command-set" aria-label="configured" />
+                  )}
+                </button>
+              ))}
+            </div>
+            <div className="process-command-panel" id="process-command-panel" role="tabpanel">
+              <div className="process-command-label">
+                <label htmlFor={`${editingId ? "edit" : "add"}-${activeProcessCommand}-command`}>
+                  {activeCommand.label} command
+                  {activeCommand.required && <span>Required</span>}
+                </label>
+                <p>{activeCommand.description}</p>
+              </div>
+            {activeProcessCommand === "start" && !isEditingFormCommand && command.trim() ? (
+              <div
+                className="command-collapsed"
+                title={command}
+                aria-disabled={editingProjectIsRunning || undefined}
+                aria-describedby={editingProjectIsRunning ? "running-edit-note" : undefined}
+              >
+                <code>{command}</code>
+              </div>
+            ) : (
+              <textarea
+                id={`${editingId ? "edit" : "add"}-${activeProcessCommand}-command`}
+                className="command-editor"
+                value={activeCommand.value}
+                onChange={(event) => updateActiveProcessCommand(event.target.value)}
+                onBlur={(event) => {
+                  if (activeProcessCommand !== "start" || !command.trim()) return;
+                  if (event.relatedTarget instanceof Element
+                    && event.relatedTarget.closest(".command-form-field")) return;
+                  setIsEditingFormCommand(false);
+                }}
+                placeholder={activeCommand.placeholder}
+                rows={1}
+                maxLength={activeProcessCommand === "start" ? 4096 : 2048}
+                spellCheck={false}
+                aria-label={`${activeCommand.label} command`}
+                aria-invalid={
+                  activeProcessCommand === "start"
+                    ? commandPortMismatch
+                    : activeProcessCommand === "restart" && !restartCommandPortSynced
+                }
+                aria-describedby={editingProjectIsRunning ? "running-edit-note" : undefined}
+                disabled={editingProjectIsRunning}
+                autoFocus={
+                  activeProcessCommand === "start"
+                  && Boolean(command)
+                  && !editingProjectIsRunning
+                }
+              />
+            )}
+            {!editingProjectIsRunning
+              && validPort
+              && activeProcessCommand === "start"
+              && command.trim() && (
+              <span
+                className={`command-sync-feedback ${commandPortSynced ? "success" : "error"}`}
+                role="status"
+              >
+                {commandPortSynced
+                  ? `Command matches port ${numericPort}.`
+                  : `Command must include port ${numericPort} to match the Port field.`}
+              </span>
+            )}
+            {!editingProjectIsRunning
+              && validPort
+              && activeProcessCommand === "restart"
+              && restartCommand.trim() && (
+              <span
+                className={`command-sync-feedback ${restartCommandPortSynced ? "success" : "error"}`}
+                role="status"
+              >
+                {restartCommandPortSynced
+                  ? `Restart command matches port ${numericPort}.`
+                  : `Restart command must include port ${numericPort}.`}
+              </span>
+            )}
+            </div>
+          </div>
+        )}
+
+        <div className="project-form-footer">
+          <div className="project-form-summary">
+            {validPort && <code className="address-preview">{getLocalAddressLabel(numericPort)}</code>}
+            {error && <p className="form-error" role="alert">{error}</p>}
+            {!canSubmitProject && Boolean(name || port || command || projectFolder) && submitDisabledReason && (
+              <p className="form-submit-hint" role="status">{submitDisabledReason}</p>
+            )}
+          </div>
+          <div className="form-actions">
+            {(editingId || addProjectOpen) && (
+              <button
+                className="button"
+                type="button"
+                onClick={editingId ? resetForm : closeAddProject}
+              >
+                Cancel
+              </button>
+            )}
+            {suggestedPort !== null && (
+              <button
+                className="button port-suggestion-button"
+                type="button"
+                onClick={switchToSuggestedPort}
+              >
+                Switch to {suggestedPort}
+              </button>
+            )}
             <button
-              className="button port-suggestion-button"
-              type="button"
-              onClick={switchToSuggestedPort}
+              className="button primary"
+              type="submit"
+              disabled={!canSubmitProject}
+              title={submitDisabledReason || undefined}
             >
-              Switch to {suggestedPort}
+              {editingProjectIsRunning ? "Save name" : editingId ? "Save" : "Add"}
             </button>
-          )}
-          <button
-            className="button primary"
-            type="submit"
-            disabled={!canSubmitProject}
-            title={submitDisabledReason || undefined}
-          >
-            {editingProjectIsRunning ? "Save name" : editingId ? "Save" : "Add"}
-          </button>
+          </div>
         </div>
       </form>
     );
@@ -2347,14 +3272,52 @@ export default function Home() {
 
       <header className="app-header">
         <h1>Control Module</h1>
-        <div className="app-header-actions">
+        <div className="header-appearance-actions" role="group" aria-label="Appearance">
+          <button
+            className="theme-button"
+            type="button"
+            onClick={openThemeEditor}
+            aria-label="Open custom themes"
+            title="Custom themes"
+          >
+            <span className="action-icon palette-icon" aria-hidden="true" />
+          </button>
+          <button
+            className="theme-button"
+            type="button"
+            onClick={toggleTheme}
+            aria-label={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+            title={theme === "dark" ? "Light mode" : "Dark mode"}
+          >
+            <span
+              className={`action-icon ${theme === "dark" ? "sun-icon" : "moon-icon"}`}
+              aria-hidden="true"
+            />
+          </button>
+        </div>
+      </header>
+
+      <section className="app-functions-bar" aria-labelledby="app-functions-title">
+        <div className="app-functions-summary">
+          <div>
+            <h2 id="app-functions-title">App functions</h2>
+            <span className={`runner-state ${runnerOnline ? "online" : "offline"}`}>
+              {runnerOnline ? "Runner online" : "Runner offline"}
+            </span>
+          </div>
+          <p>
+            {projects.filter((project) => project.running).length} running · {projects.length} total
+          </p>
+        </div>
+        <div className="app-functions-actions">
           <div className="header-bulk-actions" role="group" aria-label="Project actions">
             <button
               className={`button select-mode-button ${selectionMode ? "active" : ""}`}
               type="button"
               onClick={toggleSelectionMode}
-              disabled={isStartingAll || isStoppingAll}
+              disabled={projects.length === 0 || isStartingAll || isStoppingAll}
               aria-pressed={selectionMode}
+              title={projects.length === 0 ? "Add a project before selecting" : undefined}
             >
               {selectionMode ? (
                 <>
@@ -2363,245 +3326,131 @@ export default function Home() {
                 </>
               ) : "Select"}
             </button>
-            <button
-              className="button run-all-button"
-              type="button"
-              onClick={() => void runAllProjects()}
-              disabled={!runnerOnline || startableCount === 0 || isStartingAll || isStoppingAll || actionCooldownActive || Boolean(editingId)}
-              aria-label={isStartingAll
-                ? "Starting projects"
-                : selectionMode ? "Run selected projects" : "Run all projects"}
-              title={editingId
-                ? "Finish editing before starting projects"
-                : selectionMode && selectedCount === 0
-                  ? "Select at least one project"
-                  : startableCount === 0
-                    ? selectionMode ? "The selected projects are already running" : "All projects are already running"
-                    : selectionMode ? "Start the selected stopped projects" : "Start every stopped project"}
-            >
-              {isStartingAll ? "Starting…" : (
-                <>Run<span className="header-action-scope">-{selectionMode ? "selected" : "all"}</span></>
-              )}
-            </button>
-            <button
-              className="button stop-all-button"
-              type="button"
-              onClick={() => setStopAllOpen(true)}
-              disabled={!runnerOnline || stoppableCount === 0 || isStartingAll || isStoppingAll || actionCooldownActive}
-              aria-label={selectionMode ? "Stop selected projects" : "Stop all projects"}
-              title={selectionMode && selectedCount === 0
-                ? "Select at least one project"
-                : stoppableCount === 0
-                  ? selectionMode ? "No selected projects are running" : "No projects are running"
-                  : selectionMode ? "Stop the selected running projects" : "Stop every project started by Control Module"}
-            >
-              Stop<span className="header-action-scope">-{selectionMode ? "selected" : "all"}</span>
-            </button>
+            {!selectionMode && (
+              <>
+                <button
+                  className="button run-all-button"
+                  type="button"
+                  onClick={() => void runAllProjects()}
+                  disabled={!runnerOnline || startableCount === 0 || isStartingAll || isStoppingAll || actionCooldownActive || Boolean(editingId)}
+                  aria-label={isStartingAll ? "Starting projects" : "Run all projects"}
+                  title={editingId
+                    ? "Finish editing before starting projects"
+                    : startableCount === 0
+                      ? "All projects are already running"
+                      : "Start every stopped project"}
+                >
+                  {isStartingAll ? "Starting…" : <>Run<span className="header-action-scope">-all</span></>}
+                </button>
+                <button
+                  className="button stop-all-button"
+                  type="button"
+                  onClick={() => setStopAllOpen(true)}
+                  disabled={!runnerOnline || stoppableCount === 0 || isStartingAll || isStoppingAll || actionCooldownActive}
+                  aria-label="Stop all projects"
+                  title={stoppableCount === 0
+                    ? "No projects are running"
+                    : "Stop every project started by Control Module"}
+                >
+                  Stop<span className="header-action-scope">-all</span>
+                </button>
+              </>
+            )}
           </div>
-          <button
-            className="button settings-button"
-            type="button"
-            onClick={() => void openAppSettings()}
-            aria-haspopup="dialog"
-            disabled={!runnerOnline}
-            title={!runnerOnline ? "Start Control Module before opening settings" : "Settings"}
-          >
-            <span className="action-icon settings-icon" aria-hidden="true" />
-            Settings
-          </button>
-          <div className="header-appearance-actions" role="group" aria-label="Appearance">
+          <div className="transfer-control" ref={transferMenuRef}>
             <button
-              className="theme-button"
+              className="button transfer-button"
               type="button"
-              onClick={openThemeEditor}
-              aria-label="Open custom themes"
-              title="Custom themes"
-            >
-              <span className="action-icon palette-icon" aria-hidden="true" />
-            </button>
-            <button
-              className="theme-button"
-              type="button"
-              onClick={toggleTheme}
-              aria-label={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
-              title={theme === "dark" ? "Light mode" : "Dark mode"}
-            >
-              <span
-                className={`action-icon ${theme === "dark" ? "sun-icon" : "moon-icon"}`}
-                aria-hidden="true"
-              />
-            </button>
-          </div>
-        </div>
-      </header>
-
-      <section
-        className="form-section"
-        aria-labelledby="form-title"
-        aria-hidden={editingId ? true : undefined}
-        inert={editingId ? true : undefined}
-      >
-        <h2 id="form-title">Add project</h2>
-        <form className="project-form" onSubmit={saveProject} noValidate>
-          <div className="field project-name-field">
-            <label htmlFor="project-name">Name</label>
-            <input
-              id="project-name"
-              value={addDraft.name}
-              onChange={(event) => {
-                setName(event.target.value);
-                setError("");
+              onClick={() => {
+                setTransferMenuOpen((current) => !current);
+                setFiltersOpen(false);
               }}
-                placeholder="Name of project"
-              maxLength={48}
-              autoComplete="off"
+              aria-expanded={transferMenuOpen}
+              aria-haspopup="menu"
+              aria-label="More app actions"
+            >
+              <span className="action-icon ellipsis-vertical-icon" aria-hidden="true" />
+              More
+            </button>
+            {transferMenuOpen && (
+              <div className="transfer-popover" role="menu" aria-label="App options">
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    setTransferMenuOpen(false);
+                    void openAppSettings();
+                  }}
+                  disabled={!runnerOnline}
+                >
+                  <strong>Settings</strong>
+                  <span>Appearance and app setup</span>
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={exportProjects}
+                  disabled={projects.length === 0}
+                >
+                  <strong>Export projects</strong>
+                  <span>Download a JSON copy</span>
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={chooseImportFile}
+                  disabled={!runnerOnline || isImportingProjects}
+                >
+                  <strong>Import projects</strong>
+                  <span>Load projects from JSON</span>
+                </button>
+                <p>Files can contain private paths and shell commands.</p>
+              </div>
+            )}
+            <input
+              ref={importFileInputRef}
+              className="sr-only"
+              type="file"
+              accept="application/json,.json"
+              tabIndex={-1}
+              onChange={(event) => void readImportFile(event)}
+              aria-hidden="true"
             />
           </div>
-
-          <div className="address-fields port-only">
-            <div className="field port-field">
-              <label htmlFor="add-project-port">Port</label>
-              <input
-                id="add-project-port"
-                inputMode="numeric"
-                pattern="[0-9]*"
-                value={addDraft.port}
-                onChange={(event) => {
-                  portCheckSequence.current += 1;
-                  const nextPort = event.target.value.replace(/\D/g, "").slice(0, 4);
-                  const nextPortNumber = Number(nextPort);
-                  const trackedPort = syncedCommandPort.current;
-                  setPort(nextPort);
-                  if (
-                    /^\d{4}$/.test(nextPort)
-                    && trackedPort !== null
-                    && trackedPort !== nextPortNumber
-                    && commandHasPort(command, trackedPort)
-                  ) {
-                    setCommand(replaceCommandPort(command, trackedPort, nextPortNumber));
-                    syncedCommandPort.current = nextPortNumber;
-                  } else if (/^\d{4}$/.test(nextPort) && trackedPort === null) {
-                    syncedCommandPort.current = nextPortNumber;
-                  }
-                  setSuggestedPort(null);
-                  setPortFeedback(null);
-                  setError("");
-                }}
-                placeholder="1234"
-                maxLength={4}
-                autoComplete="off"
-                aria-invalid={portFeedback?.kind === "error"}
-              />
-              {addDraft.portFeedback && (
-                <span className={`port-feedback ${addDraft.portFeedback.kind}`} role="status">
-                  {addDraft.portFeedback.message}
-                </span>
-              )}
-            </div>
-          </div>
-
-          <div className="field command-form-field">
-            <div className="command-form-header">
-              <span>Command</span>
-              <div className="command-form-header-actions">
-                {addDraft.command.trim() && (
-                  <button
-                    className="command-edit-button"
-                    type="button"
-                    onClick={toggleFormCommandEditing}
-                    aria-expanded={addDraft.isEditingFormCommand}
-                  >
-                    {!addDraft.isEditingFormCommand && <span className="action-icon edit-icon" aria-hidden="true" />}
-                    {addDraft.isEditingFormCommand ? "Done" : "Edit"}
-                  </button>
-                )}
-              </div>
-            </div>
-            {addDraft.isEditingFormCommand || !addDraft.command.trim() ? (
-              <textarea
-                id="add-project-command"
-                className="command-editor"
-                value={addDraft.command}
-                onChange={(event) => {
-                  const nextCommand = event.target.value;
-                  setCommand(nextCommand);
-                  setError("");
-                  if (validPort && commandHasPort(nextCommand, numericPort)) {
-                    syncedCommandPort.current = numericPort;
-                  }
-                }}
-                onBlur={(event) => {
-                  if (!command.trim()) return;
-                  if (event.relatedTarget instanceof Element
-                    && event.relatedTarget.closest(".command-form-field")) return;
-                  setIsEditingFormCommand(false);
-                }}
-                placeholder="the path to make your app run"
-                rows={1}
-                maxLength={4096}
-                spellCheck={false}
-                aria-label="Command"
-                aria-invalid={addValidPort && Boolean(addDraft.command.trim()) && !addCommandPortSynced}
-                autoFocus={!editingId && Boolean(addDraft.command)}
-              />
-            ) : (
-              <div className="command-collapsed" title={addDraft.command}>
-                <code>{addDraft.command}</code>
-              </div>
-            )}
-            {addValidPort && addDraft.command.trim() && (
-              <span
-                className={`command-sync-feedback ${addCommandPortSynced ? "success" : "error"}`}
-                role="status"
-              >
-                {addCommandPortSynced
-                  ? `Command matches port ${addNumericPort}.`
-                  : `Command must include port ${addNumericPort} to match the Port field.`}
-              </span>
-            )}
-          </div>
-
-          {addValidPort && <code className="address-preview">{getLocalAddressLabel(addNumericPort)}</code>}
-          {addDraft.error && <p className="form-error" role="alert">{addDraft.error}</p>}
-
-          <div className="form-actions">
-            {addDraft.suggestedPort !== null && (
-              <button
-                className="button port-suggestion-button"
-                type="button"
-                onClick={switchToSuggestedPort}
-              >
-                Switch to {addDraft.suggestedPort}
-              </button>
-            )}
-            <button
-              className="button primary"
-              type="submit"
-              disabled={Boolean(editingId) || !canSubmitProject}
-              title={editingId ? "Close Edit project to use Add project." : submitDisabledReason || undefined}
-            >
-              Add
-            </button>
-          </div>
-        </form>
+        </div>
       </section>
 
       <section className="projects-section" aria-labelledby="projects-title">
         <div className="section-header">
-          <h2 id="projects-title">Projects</h2>
-          <span>{hasProjectFilters ? `${filteredProjects.length}/${projects.length}` : projects.length}</span>
+          <div className="section-header-main">
+            <h2 id="projects-title">Projects</h2>
+            <span>{hasProjectFilters ? `${filteredProjects.length}/${projects.length}` : projects.length}</span>
+          </div>
+          <button
+            className="button primary add-project-button"
+            type="button"
+            onClick={openAddProject}
+            disabled={!runnerOnline || Boolean(editingId)}
+            aria-haspopup="dialog"
+            aria-keyshortcuts="N"
+            title={!runnerOnline ? "Reopen Control Module.app before adding a project" : "Add project (N)"}
+          >
+            Add project
+          </button>
         </div>
 
         <div className="project-toolbar" ref={filterMenuRef}>
           <div className="port-search">
             <label className="sr-only" htmlFor="port-search">Search projects by port</label>
             <input
+              ref={portSearchRef}
               id="port-search"
               inputMode="numeric"
               value={portSearch}
               onChange={(event) => setPortSearch(event.target.value.replace(/\D/g, "").slice(0, 4))}
               placeholder="Search port"
               autoComplete="off"
+              aria-keyshortcuts="/"
             />
           </div>
           <button
@@ -2668,6 +3517,7 @@ export default function Home() {
                   value={sortBy}
                   onChange={setSortBy}
                   options={[
+                    { value: "manual", label: "Manual order" },
                     { value: "updated", label: "Last updated" },
                     { value: "name", label: "Name" },
                     { value: "port", label: "Port" },
@@ -2675,29 +3525,31 @@ export default function Home() {
                 />
               </div>
 
-              <fieldset className="sort-order-field">
-                <legend>Order</legend>
-                <div className="sort-order-buttons">
-                  <button
-                    className={`button ${sortOrder === "ascending" ? "active" : ""}`}
-                    type="button"
-                    onClick={() => setSortOrder("ascending")}
-                    aria-pressed={sortOrder === "ascending"}
-                  >
-                    <span className="action-icon sort-ascending-icon" aria-hidden="true" />
-                    Ascending
-                  </button>
-                  <button
-                    className={`button ${sortOrder === "descending" ? "active" : ""}`}
-                    type="button"
-                    onClick={() => setSortOrder("descending")}
-                    aria-pressed={sortOrder === "descending"}
-                  >
-                    <span className="action-icon sort-descending-icon" aria-hidden="true" />
-                    Descending
-                  </button>
-                </div>
-              </fieldset>
+              {sortBy !== "manual" && (
+                <fieldset className="sort-order-field">
+                  <legend>Order</legend>
+                  <div className="sort-order-buttons">
+                    <button
+                      className={`button ${sortOrder === "ascending" ? "active" : ""}`}
+                      type="button"
+                      onClick={() => setSortOrder("ascending")}
+                      aria-pressed={sortOrder === "ascending"}
+                    >
+                      <span className="action-icon sort-ascending-icon" aria-hidden="true" />
+                      Ascending
+                    </button>
+                    <button
+                      className={`button ${sortOrder === "descending" ? "active" : ""}`}
+                      type="button"
+                      onClick={() => setSortOrder("descending")}
+                      aria-pressed={sortOrder === "descending"}
+                    >
+                      <span className="action-icon sort-descending-icon" aria-hidden="true" />
+                      Descending
+                    </button>
+                  </div>
+                </fieldset>
+              )}
 
               <div className="filter-popover-actions">
                 <button className="button" type="button" onClick={clearProjectFilters}>
@@ -2711,15 +3563,82 @@ export default function Home() {
           )}
         </div>
 
+        {selectionMode && (
+          <div className="selection-toolbar" role="region" aria-label="Project selection">
+            <p>
+              <strong>{selectedCount}</strong> selected
+              <span aria-hidden="true"> · </span>
+              <span>{filteredProjects.length} shown</span>
+            </p>
+            <div className="selection-toolbar-actions">
+              <button
+                className="button"
+                type="button"
+                onClick={toggleVisibleProjectSelection}
+                disabled={filteredProjects.length === 0}
+              >
+                {allVisibleProjectsSelected ? "Deselect visible" : "Select visible"}
+              </button>
+              {selectedCount > 0 && (
+                <button className="button" type="button" onClick={() => setSelectedProjectIds({})}>
+                  Clear
+                </button>
+              )}
+              <button
+                className="button run-all-button"
+                type="button"
+                onClick={() => void runAllProjects()}
+                disabled={!runnerOnline || startableCount === 0 || isStartingAll || isStoppingAll || actionCooldownActive}
+                aria-label={isStartingAll ? "Starting selected projects" : "Run selected projects"}
+                title={selectedCount === 0
+                  ? "Select at least one project"
+                  : startableCount === 0
+                    ? "The selected projects are already running"
+                    : "Start the selected stopped projects"}
+              >
+                {isStartingAll ? "Starting…" : "Run selected"}
+              </button>
+              <button
+                className="button stop-all-button"
+                type="button"
+                onClick={() => setStopAllOpen(true)}
+                disabled={!runnerOnline || stoppableCount === 0 || isStartingAll || isStoppingAll || actionCooldownActive}
+                aria-label="Stop selected projects"
+                title={selectedCount === 0
+                  ? "Select at least one project"
+                  : stoppableCount === 0
+                    ? "No selected projects are running"
+                    : "Stop the selected running projects"}
+              >
+                Stop selected
+              </button>
+              <button className="button" type="button" onClick={toggleSelectionMode}>
+                Done
+              </button>
+            </div>
+          </div>
+        )}
+
         {!isReady ? (
           <p className="empty-message">Loading…</p>
         ) : !runnerOnline ? (
-          <p className="empty-message error-text">Runner offline. Reopen Control Module.app.</p>
+          <div className="empty-state error-text">
+            <p>Runner offline. Reopen Control Module.app, then retry.</p>
+            <button className="button" type="button" onClick={() => void loadProjects(true)}>Retry</button>
+          </div>
         ) : sortedProjects.length === 0 ? (
-          <p className="empty-message">No projects.</p>
+          <div className="empty-state">
+            <p>No projects yet.</p>
+            <button className="button primary" type="button" onClick={openAddProject}>Add project</button>
+          </div>
         ) : filteredProjects.length === 0 ? (
-          <p className="empty-message">No matching projects.</p>
+          <div className="empty-state">
+            <p>No projects match the current search or filters.</p>
+            <button className="button" type="button" onClick={clearProjectFilters}>Clear filters</button>
+          </div>
         ) : (
+          <>
+          <p className="sr-only" role="status" aria-live="polite">{reorderAnnouncement}</p>
           <div className={`project-list ${projectView === "cards" ? "card-view" : "list-view"}`}>
             {filteredProjects.map((project) => {
               const url = getUrl(PRIMARY_HOST, project.port);
@@ -2729,8 +3648,21 @@ export default function Home() {
               const isSelected = Boolean(selectedProjectIds[project.id]);
               const commandVisible = Boolean(visibleCommands[project.id]);
               const addedDetails = getAddedDetails(project.createdAt);
+              const projectErrorVisible = Boolean(
+                !project.running
+                && project.lastLog
+                && dismissedProjectErrors[project.id] !== project.lastLog,
+              );
+              const dropClass = projectDropTarget?.id === project.id
+                ? ` drag-over-${projectDropTarget.position}`
+                : "";
               return (
-                <article className={`project-row ${selectionMode ? "selecting" : ""}`} key={project.id}>
+                <article
+                  className={`project-row ${project.running ? "is-running" : "is-stopped"}${selectionMode ? " selecting" : ""}${isSelected ? " selected" : ""}${draggingProjectId === project.id ? " is-dragging" : ""}${dropClass}`}
+                  key={project.id}
+                  onDragOver={(event) => handleProjectDragOver(event, project.id)}
+                  onDrop={(event) => handleProjectDrop(event, project)}
+                >
                   <div className="project-main">
                     <div className="project-header-row">
                       <div className="project-heading">
@@ -2744,6 +3676,32 @@ export default function Home() {
                             aria-pressed={isSelected}
                           >
                             <span aria-hidden="true">✓</span>
+                          </button>
+                        )}
+                        {!selectionMode && projects.length > 1 && (
+                          <button
+                            className="project-drag-handle"
+                            type="button"
+                            draggable={canReorderProjects}
+                            aria-disabled={!canReorderProjects}
+                            onClick={() => setReorderAnnouncement(
+                              canReorderProjects
+                                ? `Use the arrow keys or drag to move ${project.name}.`
+                                : reorderDisabledReason,
+                            )}
+                            onKeyDown={(event) => {
+                              if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+                              event.preventDefault();
+                              moveProjectByKeyboard(project, event.key === "ArrowUp" ? -1 : 1);
+                            }}
+                            onDragStart={(event) => handleProjectDragStart(event, project)}
+                            onDragEnd={finishProjectDrag}
+                            aria-label={canReorderProjects
+                              ? `Reorder ${project.name}. Use arrow keys or drag.`
+                              : `Cannot reorder ${project.name}. ${reorderDisabledReason}.`}
+                            title={canReorderProjects ? `Reorder ${project.name}` : reorderDisabledReason}
+                          >
+                            <span className="action-icon drag-handle-icon" aria-hidden="true" />
                           </button>
                         )}
                         <div className="project-info-control" data-project-info>
@@ -2792,6 +3750,18 @@ export default function Home() {
                                   </dl>
                                 </div>
                               </div>
+                              <button
+                                className="project-menu-item project-menu-danger"
+                                type="button"
+                                role="menuitem"
+                                onClick={() => {
+                                  setProjectInfoId(null);
+                                  openDeleteModal(project);
+                                }}
+                                disabled={isBusy || isStartingAll || isStoppingAll || actionCooldownActive}
+                              >
+                                Delete project
+                              </button>
                             </div>
                           )}
                         </div>
@@ -2801,11 +3771,12 @@ export default function Home() {
                         </span>
                       </div>
                       </div>
-                      <div
-                        className="project-quick-actions"
-                        role="group"
-                        aria-label={`${project.name} quick actions`}
-                      >
+                      {!selectionMode && (
+                        <div
+                          className="project-quick-actions"
+                          role="group"
+                          aria-label={`${project.name} quick actions`}
+                        >
                         <button
                           className="project-open-link project-edit-link"
                           type="button"
@@ -2837,10 +3808,11 @@ export default function Home() {
                             title="Start the project to open its link"
                           >
                             <span className="action-icon external-link-icon" aria-hidden="true" />
-                            <span className="project-quick-action-label">Open link</span>
+                            <span className="project-quick-action-label">Start to open</span>
                           </button>
                         )}
-                      </div>
+                        </div>
+                      )}
                     </div>
                     <div className="project-url">
                       {project.running ? (
@@ -2853,8 +3825,10 @@ export default function Home() {
                         <span>{getLocalAddressLabel(project.port)}</span>
                       )}
                     </div>
-                    <div className="project-command-layout">
-                      <div className="project-command">
+                    {!selectionMode && (
+                      <>
+                        <div className="project-command-layout">
+                          <div className="project-command">
                         <div className="project-command-header">
                           <span>Command</span>
                           <div className="project-command-actions">
@@ -2901,8 +3875,8 @@ export default function Home() {
                         </div>
                       </div>
 
-                      <div className="project-actions">
-                        <div className="project-runtime-actions">
+                          <div className="project-actions">
+                            <div className="project-runtime-actions">
                           <button
                             className={`button project-action-toggle ${project.running ? "stop" : "start"}`}
                             type="button"
@@ -2924,28 +3898,34 @@ export default function Home() {
                             )}
                             {isRestarting ? "Restarting…" : "Restart"}
                           </button>
+                            </div>
+                          </div>
                         </div>
-                        <button
-                          className="button quiet-danger project-action-delete"
-                          type="button"
-                          onClick={() => openDeleteModal(project)}
-                          disabled={isBusy || isStartingAll || isStoppingAll || actionCooldownActive}
-                        >
-                          Delete
-                        </button>
-                      </div>
-                    </div>
-                    {!project.running && project.lastLog && (
-                      <div className="project-error" role="status">
-                        <strong>Project error</strong>
-                        <code>{project.lastLog}</code>
-                      </div>
+                        {projectErrorVisible && (
+                          <div className="project-error" role="status" aria-label={`${project.name} project error`}>
+                            <div className="project-error-header">
+                              <strong>Project error</strong>
+                              <button
+                                className="project-error-dismiss"
+                                type="button"
+                                onClick={() => dismissProjectError(project)}
+                                aria-label={`Dismiss ${project.name} error`}
+                                title="Dismiss error"
+                              >
+                                <span className="action-icon close-icon" aria-hidden="true" />
+                              </button>
+                            </div>
+                            <code>{project.lastLog}</code>
+                          </div>
+                        )}
+                      </>
                     )}
                   </div>
                 </article>
               );
             })}
           </div>
+          </>
         )}
       </section>
 
@@ -3403,9 +4383,152 @@ export default function Home() {
         </div>
       )}
 
-      {editingId && (
+      {importPreview && (
         <div
           className="modal-backdrop"
+          onMouseDown={(event) => {
+            if (event.currentTarget === event.target) closeImportPreview();
+          }}
+        >
+          <section
+            className="delete-modal import-projects-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="import-projects-title"
+            aria-describedby="import-projects-description"
+          >
+            <div className="edit-project-modal-header">
+              <div className="edit-project-modal-heading">
+                <h2 id="import-projects-title">Import projects</h2>
+                <p className="project-modal-note" id="import-projects-description">
+                  Review this file before saving it to this instance.
+                </p>
+              </div>
+              <button
+                className="filter-close-button"
+                type="button"
+                onClick={closeImportPreview}
+                disabled={isImportingProjects}
+                aria-label="Close project import"
+              >
+                <span className="action-icon close-icon" aria-hidden="true" />
+              </button>
+            </div>
+
+            <div className="import-file-summary">
+              <strong title={importPreview.fileName}>{importPreview.fileName}</strong>
+              <span>
+                {importPreview.projects.length} ready
+                {importPreview.issues.length > 0 ? ` · ${importPreview.issues.length} skipped` : ""}
+              </span>
+            </div>
+
+            <div className="import-privacy-note">
+              Imported projects stay stopped. Saved paths and commands may need editing on another Mac.
+              Port availability is checked when you confirm.
+            </div>
+
+            {importPreview.projects.length > 0 && (
+              <div className="import-preview-group">
+                <strong>Ready to import</strong>
+                <ul>
+                  {importPreview.projects.slice(0, 6).map((project) => (
+                    <li key={`${project.port}-${project.name}`}>
+                      <span>{project.name}</span>
+                      <code>{project.port}</code>
+                    </li>
+                  ))}
+                </ul>
+                {importPreview.projects.length > 6 && (
+                  <p>{importPreview.projects.length - 6} more projects</p>
+                )}
+              </div>
+            )}
+
+            {importPreview.issues.length > 0 && (
+              <div className="import-preview-group import-issues" role="status">
+                <strong>Skipped from this file</strong>
+                <ul>
+                  {importPreview.issues.slice(0, 6).map((issue) => (
+                    <li key={`${issue.index}-${issue.name}`}>
+                      <span>{issue.name}</span>
+                      <small>{issue.reason}</small>
+                    </li>
+                  ))}
+                </ul>
+                {importPreview.issues.length > 6 && (
+                  <p>{importPreview.issues.length - 6} more issues</p>
+                )}
+              </div>
+            )}
+
+            <div className="modal-actions">
+              <button
+                className="button"
+                type="button"
+                onClick={closeImportPreview}
+                disabled={isImportingProjects}
+                autoFocus
+              >
+                Cancel
+              </button>
+              <button
+                className="button primary"
+                type="button"
+                onClick={() => void importProjects()}
+                disabled={
+                  importPreview.projects.length === 0
+                  || isImportingProjects
+                  || !runnerOnline
+                  || actionCooldownActive
+                }
+              >
+                {isImportingProjects
+                  ? `Importing ${importProgress}/${importPreview.projects.length}…`
+                  : `Import ${importPreview.projects.length}`}
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
+
+      {addProjectOpen && (
+        <div
+          className="modal-backdrop project-editor-backdrop"
+          onMouseDown={(event) => {
+            if (event.currentTarget === event.target) closeAddProject();
+          }}
+        >
+          <section
+            className="edit-project-modal add-project-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="add-project-title"
+          >
+            <div className="edit-project-modal-header">
+              <div className="edit-project-modal-heading">
+                <h2 id="add-project-title">Add project</h2>
+                <p className="project-modal-note">
+                  Detect a folder automatically or configure its process commands.
+                </p>
+              </div>
+              <button
+                className="filter-close-button"
+                type="button"
+                onClick={closeAddProject}
+                aria-label="Close add project"
+              >
+                <span className="action-icon close-icon" aria-hidden="true" />
+              </button>
+            </div>
+            {renderProjectForm()}
+          </section>
+        </div>
+      )}
+
+      {editingId && (
+        <div
+          className="modal-backdrop project-editor-backdrop"
           onMouseDown={(event) => {
             if (event.currentTarget === event.target) resetForm();
           }}
@@ -3423,6 +4546,9 @@ export default function Home() {
                   <p className="running-edit-note" id="running-edit-note">
                     Running · Stop to edit port or command.
                   </p>
+                )}
+                {!editingProjectIsRunning && (
+                  <p className="project-modal-note">Edit the saved name, port, or command.</p>
                 )}
               </div>
               <button

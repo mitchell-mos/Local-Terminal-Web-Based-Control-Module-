@@ -41,6 +41,7 @@ next-env.d.ts
 !.yarn/versions
 /.wrangler/
 /.openai/
+/.impeccable/
 /.vercel/
 /outputs/
 /work/

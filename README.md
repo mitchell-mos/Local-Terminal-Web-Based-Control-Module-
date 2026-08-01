@@ -33,7 +33,11 @@ Setup records the verified checkout, private runtime path, access mode, installa
 
 Setup keeps one real `Setup.app` in the Control Module folder and does not place Setup on the Desktop. If the Desktop shortcut is selected, it links only to the real Control Module app rather than creating a duplicate app bundle. To change the port or reinstall later, open `Setup.app` from the Control Module folder.
 
-The dashboard's **Settings** button shows the current port, source mode, shortcut state, install location, and appearance. Opening native settings requires a confirmation before the authenticated loopback runner launches the verified `Setup.app` belonging to the same installation. Uninstall uses a separate warning, opens only the verified `Uninstall.app`, and then relies on that native app's second confirmation before anything is moved to Trash. The browser API never grants macOS permissions, edits installation settings directly, or deletes files.
+The dashboard's **More → Settings** option shows the current port, source mode, shortcut state, install location, and appearance. Opening native settings requires a confirmation before the authenticated loopback runner launches the verified `Setup.app` belonging to the same installation. Uninstall uses a separate warning, opens only the verified `Uninstall.app`, and then relies on that native app's second confirmation before anything is moved to Trash. The browser API never grants macOS permissions, edits installation settings directly, or deletes files.
+
+The **Add project** window starts in Basic mode. You can browse for a folder inside your macOS home folder or enter its full path; Control Module resolves the path inside that boundary and reads only the selected folder's top-level `package.json` (when present) and lockfile names to recognize static files, Vite-compatible projects, Astro, SvelteKit, Next.js, and custom package scripts. It selects npm, pnpm, Yarn, or Bun from the declared package manager or project lockfile and displays a shell-escaped command for review. pnpm and Yarn commands use the bundled Node.js Corepack launcher. Basic mode never installs packages or starts the project automatically. Advanced mode keeps the Start command required and adds optional Setup, Stop, and Restart commands for projects with custom process lifecycles.
+
+Use **App functions → More → Export projects** to move project definitions between Control Module installations, then use **Import projects** from the same menu on the destination. Export creates a versioned JSON file containing project names, ports, and saved lifecycle commands only; it excludes runtime IDs, process IDs, logs, status, tokens, timestamps, themes, and application settings. Import validates the file, assigns fresh project IDs, rechecks every destination port, skips conflicts instead of silently changing them, and leaves every imported project stopped. Export files can contain private filesystem paths and arbitrary shell commands, so review them before importing and do not publish them unless you have removed sensitive information.
 
 When you change the install location, Setup verifies the previous launcher's internal installation marker, installs and records the replacement first, updates its shortcut, and then moves only that superseded launcher to Trash. Other Control Module installations and unrelated apps are untouched.
 
@@ -93,12 +97,13 @@ The root keeps only launch/runtime source and files that GitHub, Node.js, pnpm, 
 Control Module has the same authority as the macOS account that launches it. It intentionally:
 
 - runs commands that you explicitly save and start through `/bin/zsh -c`;
+- opens a macOS folder picker only when requested and inspects only the explicitly selected folder's top-level `package.json` and package-manager lockfile names to generate a Basic-mode command;
 - reads local TCP listener information with `lsof` to verify that a newly opened port belongs to the process group it started;
 - sends `SIGTERM` to managed process groups when you stop them, waits five seconds, and uses `SIGKILL` only if that same managed process group does not exit;
 - checks the macOS console lock flag with `ioreg` every five seconds and stops managed projects after the Mac remains locked for 15 minutes;
 - stores project settings and local command output on disk.
 
-Control Module does not scan arbitrary files, upload data, contact an AI service, or signal processes that it did not launch and verify. Commands run with a minimal environment instead of inheriting tokens or unrelated environment variables from the launcher.
+Control Module does not crawl project folders, upload data, contact an AI service, install detected project dependencies, or signal processes that it did not launch and verify. Commands run with a minimal environment instead of inheriting tokens or unrelated environment variables from the launcher.
 
 ## Private local data
 
@@ -137,7 +142,8 @@ Never commit runtime JSON, logs, `.env` files, tokens, or project-specific files
 
 - The dashboard and runner are loopback-only and are not intended to accept LAN or internet traffic.
 - The browser sends API requests only to the dashboard's own loopback origin. The dashboard rejects invalid hosts, origins, and cross-site browser requests, then forwards accepted calls to the private runner with a random token read from its private local data directory. The runner independently validates its exact local Origin, Host, and rotating token. The browser, page URL, bookmarks, and Web Storage never receive that token.
-- Saved commands are arbitrary shell commands. Only run commands you understand and trust.
+- Saved Start, Setup, Stop, and Restart commands are arbitrary shell commands. Only run commands you understand and trust. Setup runs before Start and Restart; Stop runs before Control Module's managed process-group shutdown; a saved Restart command is used in place of Start after the old host closes.
+- Basic-mode commands are generated locally, shown before saving, and do not run until you press Start. Selecting a package script means trusting that script and its installed dependencies.
 - Control Module is not a sandbox, container, permissions boundary, remote administration panel, or multi-user service.
 - A project command can still read or change anything the current macOS user can access. Review commands before starting them.
 - Do not expose either port through a reverse proxy, tunnel, router, public server, or port-forwarding rule.

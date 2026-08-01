@@ -83,6 +83,14 @@ test("does not ship private user data or unrelated runtime state", async () => {
   assert.match(page, /beginProjectRateLimitedAction\(project\.id\)/);
   assert.match(page, /projectCooldownIds/);
   assert.match(page, /busyProjectIds/);
+  assert.match(page, /projectWindowName\(project\.id\)/);
+  assert.match(page, /tabWasOpen/);
+  assert.match(page, /tabReloaded/);
+  assert.match(page, /_control_reload/);
+  assert.match(page, /Go to refreshed tab/);
+  assert.match(page, /Open website/);
+  assert.doesNotMatch(page, />\s*Deny\s*</);
+  assert.doesNotMatch(page, />\s*Accept\s*</);
   assert.match(restartIcon, /M21 3v5h-5/);
   assert.match(proxy, /runtime", "session-token/);
   assert.match(proxy, /"X-Control-Token": token/);

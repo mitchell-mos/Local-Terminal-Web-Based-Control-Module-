@@ -58,6 +58,17 @@ type Project = {
   stopReason?: string;
 };
 
+type RestartPrompt = {
+  project: Project;
+  tabWasOpen: boolean;
+  tabReloaded: boolean;
+};
+
+type TrackedProjectWindow = {
+  window: Window;
+  host: Host;
+};
+
 type ProjectDropTarget = {
   id: string;
   position: "before" | "after";
@@ -1066,7 +1077,7 @@ export default function Home() {
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedProjectIds, setSelectedProjectIds] = useState<Record<string, boolean>>({});
   const [stopAllOpen, setStopAllOpen] = useState(false);
-  const [restartPromptProject, setRestartPromptProject] = useState<Project | null>(null);
+  const [restartPrompt, setRestartPrompt] = useState<RestartPrompt | null>(null);
   const [isStartingAll, setIsStartingAll] = useState(false);
   const [isStoppingAll, setIsStoppingAll] = useState(false);
   const [actionCooldownActive, setActionCooldownActive] = useState(false);
@@ -1083,7 +1094,7 @@ export default function Home() {
   const projectInspectionSequence = useRef(0);
   const suggestedProjectName = useRef("");
   const syncedCommandPort = useRef<number | null>(null);
-  const projectWindows = useRef<Record<string, Window | null>>({});
+  const projectWindows = useRef<Record<string, TrackedProjectWindow | null>>({});
   const restartTriggerRef = useRef<HTMLButtonElement | null>(null);
   const lastActionAt = useRef(0);
   const actionCooldownTimer = useRef<number | null>(null);
@@ -1439,7 +1450,7 @@ export default function Home() {
       || stopAllOpen
       || editingId
       || themeEditorOpen
-      || restartPromptProject
+      || restartPrompt
       || appSettingsOpen
       || nativeAppPrompt
       || importPreview,
@@ -1563,7 +1574,7 @@ export default function Home() {
   }, [loadProjects]);
 
   useEffect(() => {
-    if (!addProjectOpen && !projectToDelete && !stopAllOpen && !filtersOpen && !projectInfoId && !editingId && !themeEditorOpen && !restartPromptProject && !appSettingsOpen && !nativeAppPrompt && !transferMenuOpen && !importPreview) return;
+    if (!addProjectOpen && !projectToDelete && !stopAllOpen && !filtersOpen && !projectInfoId && !editingId && !themeEditorOpen && !restartPrompt && !appSettingsOpen && !nativeAppPrompt && !transferMenuOpen && !importPreview) return;
     function closeOnEscape(event: KeyboardEvent) {
       if (event.key === "Escape") {
         setProjectToDelete(null);
@@ -1579,8 +1590,8 @@ export default function Home() {
           setNativeAppPrompt(null);
           setAppSettingsOpen(false);
         }
-        if (restartPromptProject) {
-          setRestartPromptProject(null);
+        if (restartPrompt) {
+          setRestartPrompt(null);
           window.requestAnimationFrame(() => restartTriggerRef.current?.focus());
         }
         if (addProjectOpen) {
@@ -1593,7 +1604,7 @@ export default function Home() {
     }
     window.addEventListener("keydown", closeOnEscape);
     return () => window.removeEventListener("keydown", closeOnEscape);
-  }, [addProjectOpen, appSettingsOpen, editingId, filtersOpen, importPreview, isImportingProjects, isStoppingAll, nativeAppOpening, nativeAppPrompt, projectInfoId, projectToDelete, restartPromptProject, stopAllOpen, themeEditorOpen, transferMenuOpen]);
+  }, [addProjectOpen, appSettingsOpen, editingId, filtersOpen, importPreview, isImportingProjects, isStoppingAll, nativeAppOpening, nativeAppPrompt, projectInfoId, projectToDelete, restartPrompt, stopAllOpen, themeEditorOpen, transferMenuOpen]);
 
   useEffect(() => {
     function handleDesktopShortcut(event: KeyboardEvent) {
@@ -2424,49 +2435,68 @@ export default function Home() {
     return `control-module-project-${projectId}`;
   }
 
-  function openProject(project: Project) {
+  function projectUrl(project: Project, host: Host, forceReload = false) {
+    const url = new URL(getUrl(host, project.port));
+    if (forceReload) url.searchParams.set("_control_reload", String(Date.now()));
+    return url.toString();
+  }
+
+  function openProject(project: Project, host: Host = PRIMARY_HOST, forceReload = false) {
     const projectWindow = window.open(
-      getUrl(PRIMARY_HOST, project.port),
+      projectUrl(project, host, forceReload),
       projectWindowName(project.id),
     );
     if (!projectWindow) {
       notify("error", "Open blocked", "Allow popups for Control Module and try again.");
       return null;
     }
-    projectWindows.current[project.id] = projectWindow;
+    projectWindows.current[project.id] = { window: projectWindow, host };
     projectWindow.focus();
     return projectWindow;
   }
 
   async function refreshProjectAfterRestart(project: Project) {
-    const projectUrl = getUrl(PRIMARY_HOST, project.port);
+    const baseUrl = getUrl(PRIMARY_HOST, project.port);
     try {
-      await fetch(projectUrl, { cache: "reload", mode: "no-cors" });
+      await fetch(baseUrl, { cache: "reload", mode: "no-cors" });
     } catch {
       // The host restart still succeeded; opening it remains available below.
     }
 
-    const existingWindow = projectWindows.current[project.id];
-    if (existingWindow && !existingWindow.closed) {
-      const freshUrl = new URL(projectUrl);
-      freshUrl.searchParams.set("_control_reload", String(Date.now()));
+    const trackedWindow = projectWindows.current[project.id];
+    if (trackedWindow && !trackedWindow.window.closed) {
       try {
-        existingWindow.location.href = freshUrl.toString();
+        trackedWindow.window.location.href = projectUrl(project, trackedWindow.host, true);
+        return { tabWasOpen: true, tabReloaded: true };
       } catch {
-        // Cross-origin restrictions can block controlling an existing tab.
+        return { tabWasOpen: true, tabReloaded: false };
       }
     }
+    return { tabWasOpen: false, tabReloaded: false };
   }
 
   function closeRestartPrompt() {
-    setRestartPromptProject(null);
+    setRestartPrompt(null);
     window.requestAnimationFrame(() => restartTriggerRef.current?.focus());
   }
 
   function acceptRestartPrompt() {
-    if (!restartPromptProject) return;
-    const opened = openProject(restartPromptProject);
-    if (opened) setRestartPromptProject(null);
+    if (!restartPrompt) return;
+    const { project, tabWasOpen, tabReloaded } = restartPrompt;
+    const trackedWindow = projectWindows.current[project.id];
+    if (tabWasOpen && trackedWindow && !trackedWindow.window.closed) {
+      if (!tabReloaded) {
+        const opened = openProject(project, trackedWindow.host, true);
+        if (!opened) return;
+      } else {
+        trackedWindow.window.focus();
+      }
+      setRestartPrompt(null);
+      return;
+    }
+
+    const opened = openProject(project, PRIMARY_HOST, tabWasOpen && !tabReloaded);
+    if (opened) setRestartPrompt(null);
   }
 
   async function startProject(project: Project) {
@@ -2538,7 +2568,7 @@ export default function Home() {
     }
     if (!beginProjectRateLimitedAction(project.id)) return;
     restartTriggerRef.current = trigger || null;
-    setRestartPromptProject(null);
+    setRestartPrompt(null);
     setProjectBusy(project.id, true);
     setRestartingIds((current) => ({ ...current, [project.id]: true }));
     setError("");
@@ -2554,8 +2584,8 @@ export default function Home() {
       if (!activeProject?.running) {
         throw new Error(activeProject?.lastLog || "The command exited during restart.");
       }
-      await refreshProjectAfterRestart(activeProject);
-      setRestartPromptProject(activeProject);
+      const tabState = await refreshProjectAfterRestart(activeProject);
+      setRestartPrompt({ project: activeProject, ...tabState });
     } catch (requestError) {
       const detail = getErrorMessage(requestError, "The command could not restart.");
       setError(detail);
@@ -4087,9 +4117,29 @@ export default function Home() {
                     <div className="project-url">
                       {project.running ? (
                         <>
-                          <a href={localhostUrl} target="_blank" rel="noreferrer">localhost:{project.port}</a>
+                          <a
+                            href={localhostUrl}
+                            target="_blank"
+                            rel="noreferrer"
+                            onClick={(event) => {
+                              event.preventDefault();
+                              openProject(project, "localhost");
+                            }}
+                          >
+                            localhost:{project.port}
+                          </a>
                           <span aria-hidden="true">&amp;</span>
-                          <a href={url} target="_blank" rel="noreferrer">127.0.0.1:{project.port}</a>
+                          <a
+                            href={url}
+                            target="_blank"
+                            rel="noreferrer"
+                            onClick={(event) => {
+                              event.preventDefault();
+                              openProject(project);
+                            }}
+                          >
+                            127.0.0.1:{project.port}
+                          </a>
                         </>
                       ) : (
                         <span>{getLocalAddressLabel(project.port)}</span>
@@ -4385,7 +4435,7 @@ export default function Home() {
         </div>
       )}
 
-      {restartPromptProject && (
+      {restartPrompt && (
         <div
           className="modal-backdrop"
           onMouseDown={(event) => {
@@ -4399,20 +4449,52 @@ export default function Home() {
             aria-labelledby="restart-open-title"
             aria-describedby="restart-open-description"
           >
-            <h2 id="restart-open-title">Restart complete</h2>
-            <p id="restart-open-description">
-              {restartPromptProject.name} is running again and its page was refreshed.
-              {" "}Do you want to go to the website?
-            </p>
-            <code className="restart-open-address">
-              {getLocalAddressLabel(restartPromptProject.port)}
-            </code>
+            <div className="restart-open-heading">
+              <span className="restart-open-symbol" aria-hidden="true">
+                <span className="action-icon restart-icon" />
+              </span>
+              <div>
+                <span>Restart complete</span>
+                <h2 id="restart-open-title">{restartPrompt.project.name}</h2>
+              </div>
+            </div>
+            <div className="restart-open-content">
+              <p id="restart-open-description">
+                {restartPrompt.tabWasOpen
+                  ? "The host is running again and an open project tab was detected."
+                  : "The host is running again. Open the project now?"}
+              </p>
+              <div
+                className={`restart-tab-state ${restartPrompt.tabWasOpen ? "tab-found" : "tab-not-found"}`}
+              >
+                <span className="restart-tab-state-dot" aria-hidden="true" />
+                <div>
+                  <strong>
+                    {restartPrompt.tabWasOpen
+                      ? restartPrompt.tabReloaded ? "Open tab refreshed" : "Open tab found"
+                      : "No open project tab"}
+                  </strong>
+                  <span>
+                    {restartPrompt.tabWasOpen
+                      ? restartPrompt.tabReloaded
+                        ? "The tab received a fresh reload. Switch to it to review the restarted host."
+                        : "The browser blocked the automatic reload. Use the button below to try again."
+                      : "The local site is ready whenever you want to check it."}
+                  </span>
+                </div>
+              </div>
+              <code className="restart-open-address">
+                {getLocalAddressLabel(restartPrompt.project.port)}
+              </code>
+            </div>
             <div className="modal-actions">
               <button className="button" type="button" onClick={closeRestartPrompt} autoFocus>
-                Deny
+                Stay here
               </button>
               <button className="button open" type="button" onClick={acceptRestartPrompt}>
-                Accept
+                {restartPrompt.tabWasOpen
+                  ? restartPrompt.tabReloaded ? "Go to refreshed tab" : "Refresh and view tab"
+                  : "Open website"}
               </button>
             </div>
           </section>

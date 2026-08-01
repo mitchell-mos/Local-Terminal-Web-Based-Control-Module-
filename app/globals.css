@@ -3204,9 +3204,104 @@ textarea:focus-visible {
   line-height: 1.5;
 }
 
+.restart-open-modal {
+  width: min(440px, 100%);
+  padding: 0;
+  overflow: hidden;
+}
+
+.restart-open-heading {
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  padding: 20px 20px 0;
+}
+
+.restart-open-heading > div {
+  min-width: 0;
+}
+
+.restart-open-heading > div > span {
+  display: block;
+  margin-bottom: 2px;
+  color: var(--success);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.restart-open-heading h2 {
+  font-size: 18px;
+}
+
+.restart-open-symbol {
+  display: grid;
+  width: 38px;
+  height: 38px;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, var(--success) 34%, var(--border));
+  border-radius: 50%;
+  background: var(--success-bg);
+  color: var(--success);
+}
+
+.restart-open-symbol .restart-icon {
+  width: 18px;
+  height: 18px;
+}
+
+.restart-open-content {
+  padding: 0 20px 18px;
+}
+
+.restart-open-content > p {
+  margin-top: 14px;
+}
+
+.restart-tab-state {
+  display: grid;
+  grid-template-columns: 7px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  margin-top: 16px;
+  padding: 12px 0;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+
+.restart-tab-state-dot {
+  width: 7px;
+  height: 7px;
+  margin-top: 4px;
+  border-radius: 50%;
+  background: var(--faint);
+}
+
+.restart-tab-state.tab-found .restart-tab-state-dot {
+  background: var(--success);
+}
+
+.restart-tab-state strong,
+.restart-tab-state span {
+  display: block;
+}
+
+.restart-tab-state strong {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.restart-tab-state div > span {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
 .restart-open-address {
   display: block;
-  margin-top: 12px;
+  margin-top: 14px;
   padding: 9px 10px;
   overflow-wrap: anywhere;
   border: 1px solid var(--border);
@@ -3216,6 +3311,13 @@ textarea:focus-visible {
   font-size: 11px;
   line-height: 1.45;
   white-space: normal;
+}
+
+.restart-open-modal .modal-actions {
+  margin-top: 0;
+  padding: 14px 20px;
+  border-top: 1px solid var(--border);
+  background: var(--input);
 }
 
 .delete-confirmation-field {

@@ -193,7 +193,7 @@ pnpm version:bump update
 pnpm version:bump fix
 ```
 
-The command updates both version files. The `Version policy` GitHub workflow verifies the transition on every push and rejects unchanged, skipped, malformed, or mismatched versions. `v1.00.0` is the initial versioned baseline.
+The command updates both version files. The `Version policy` GitHub workflow accepts the first push containing synchronized version files as the baseline, then verifies every later push and rejects unchanged, skipped, malformed, or mismatched versions.
 
 ## Disclaimer & intended use
 

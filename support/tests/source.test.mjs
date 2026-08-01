@@ -95,6 +95,7 @@ test("publishes a consistent user-facing release version", async () => {
   const packageMetadata = JSON.parse(packageJson);
   const {
     bumpVersion,
+    classifyPush,
     classifyTransition,
     formatVersion,
     packageVersion,
@@ -107,6 +108,7 @@ test("publishes a consistent user-facing release version", async () => {
   assert.deepEqual(bumpVersion(baseline, "fix"), { major: 1, update: 0, fix: 1 });
   assert.deepEqual(bumpVersion(baseline, "update"), { major: 1, update: 1, fix: 0 });
   assert.deepEqual(bumpVersion(baseline, "major"), { major: 2, update: 0, fix: 0 });
+  assert.equal(classifyPush(null, release), "baseline");
   assert.equal(classifyTransition(release, bumpVersion(release, "fix")), "fix");
   assert.equal(classifyTransition(release, bumpVersion(release, "update")), "update");
   assert.equal(classifyTransition(release, bumpVersion(release, "major")), "major");

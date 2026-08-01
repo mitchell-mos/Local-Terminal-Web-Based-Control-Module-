@@ -74,6 +74,11 @@ test("does not ship private user data or unrelated runtime state", async () => {
   assert.match(page, /\/api\/projects\/reorder/);
   assert.match(page, /draggable=\{canReorderProjects\}/);
   assert.match(page, /Dismiss \$\{project\.name\} error/);
+  assert.match(page, /control-module-project-filters-v1/);
+  assert.match(page, /window\.localStorage\.setItem\(PROJECT_FILTERS_KEY/);
+  assert.match(page, /Published site/);
+  assert.match(page, /projectDropTargetRef/);
+  assert.match(page, /setDragImage/);
   assert.match(proxy, /runtime", "session-token/);
   assert.match(proxy, /"X-Control-Token": token/);
   assert.match(proxy, /sec-fetch-site/);

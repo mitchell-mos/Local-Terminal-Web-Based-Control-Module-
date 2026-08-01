@@ -18,6 +18,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 
 HOST = "127.0.0.1"
@@ -56,6 +57,7 @@ MAX_PROJECT_PATH_LENGTH = 4096
 MAX_PACKAGE_JSON_BYTES = 1024 * 1024
 MAX_PROJECT_COMMAND_LENGTH = 4096
 MAX_OPTIONAL_COMMAND_LENGTH = 2048
+MAX_PUBLIC_URL_LENGTH = 2048
 PROJECT_HOOK_TIMEOUT_SECONDS = 60.0
 PROJECT_STOP_HOOK_TIMEOUT_SECONDS = 10.0
 
@@ -679,6 +681,7 @@ def validate_project(payload: dict[str, Any]) -> dict[str, Any]:
     project_id = str(payload.get("id", "")).strip()
     name = str(payload.get("name", "")).strip()
     host = str(payload.get("host", "")).strip()
+    public_url = str(payload.get("publicUrl", "")).strip()
     command = str(payload.get("command", "")).strip()
     setup_command = str(payload.get("setupCommand", "")).strip()
     stop_command = str(payload.get("stopCommand", "")).strip()
@@ -695,6 +698,23 @@ def validate_project(payload: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("Project names must be between 1 and 48 characters.")
     if host not in {"localhost", "127.0.0.1"}:
         raise ValueError("Choose localhost or 127.0.0.1.")
+    if len(public_url) > MAX_PUBLIC_URL_LENGTH:
+        raise ValueError(
+            f"Keep the published-site address under {MAX_PUBLIC_URL_LENGTH:,} characters."
+        )
+    if public_url:
+        try:
+            parsed_public_url = urlsplit(public_url)
+        except ValueError as error:
+            raise ValueError("Enter a complete published-site address.") from error
+        if parsed_public_url.scheme not in {"http", "https"}:
+            raise ValueError("The published site must use http:// or https://.")
+        if not parsed_public_url.hostname:
+            raise ValueError("Enter a complete published-site address.")
+        if parsed_public_url.username or parsed_public_url.password:
+            raise ValueError(
+                "The published-site address cannot contain a username or password."
+            )
     restriction = project_port_restriction_reason(port)
     if restriction:
         raise ValueError(restriction)
@@ -721,6 +741,7 @@ def validate_project(payload: dict[str, Any]) -> dict[str, Any]:
         "name": name,
         "host": host,
         "port": port,
+        "publicUrl": public_url,
         "command": command,
         "setupCommand": setup_command,
         "stopCommand": stop_command,
@@ -1353,6 +1374,8 @@ class ControlHandler(BaseHTTPRequestHandler):
                 immutable_fields_changed = (
                     str(validated["host"]) != str(existing.get("host", ""))
                     or int(validated["port"]) != project_port(existing)
+                    or str(validated["publicUrl"]).strip()
+                    != str(existing.get("publicUrl", "")).strip()
                     or str(validated["command"]).strip()
                     != str(existing.get("command", "")).strip()
                     or str(validated["setupCommand"]).strip()
@@ -1365,12 +1388,13 @@ class ControlHandler(BaseHTTPRequestHandler):
                 if immutable_fields_changed:
                     raise ValueError(
                         "Only the project name can be edited while it is running. "
-                        "Stop it to change the port or process commands."
+                        "Stop it to change the port, published site, or process commands."
                     )
                 validated = {
                     **validated,
                     "host": str(existing.get("host", validated["host"])),
                     "port": int(existing.get("port", validated["port"])),
+                    "publicUrl": str(existing.get("publicUrl", "")),
                     "command": str(existing.get("command", validated["command"])),
                     "setupCommand": str(existing.get("setupCommand", "")),
                     "stopCommand": str(existing.get("stopCommand", "")),

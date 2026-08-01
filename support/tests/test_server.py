@@ -330,6 +330,7 @@ class ControlServerTests(unittest.TestCase):
             "name": "Custom process",
             "host": "127.0.0.1",
             "port": 4327,
+            "publicUrl": "https://example.com/project",
             "command": "PORT=4327 npm run start",
             "setupCommand": "npm install",
             "stopCommand": "npm run stop",
@@ -339,6 +340,7 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(validated["setupCommand"], "npm install")
         self.assertEqual(validated["stopCommand"], "npm run stop")
         self.assertEqual(validated["restartCommand"], "PORT=4327 npm run restart")
+        self.assertEqual(validated["publicUrl"], "https://example.com/project")
         with self.assertRaisesRegex(ValueError, "setup command"):
             control_server.validate_project({
                 **validated,
@@ -348,6 +350,16 @@ class ControlServerTests(unittest.TestCase):
             control_server.validate_project({
                 **validated,
                 "restartCommand": "PORT=9998 npm run restart",
+            })
+        with self.assertRaisesRegex(ValueError, "must use http"):
+            control_server.validate_project({
+                **validated,
+                "publicUrl": "ftp://example.com/project",
+            })
+        with self.assertRaisesRegex(ValueError, "username or password"):
+            control_server.validate_project({
+                **validated,
+                "publicUrl": "https://user:secret@example.com/project",
             })
 
     def test_optional_project_hook_is_logged_and_checked(self) -> None:

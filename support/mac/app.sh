@@ -8,11 +8,12 @@ REPOSITORY_DIR="${SCRIPT_DIR:h:h}"
 SOURCE_DIR="$REPOSITORY_DIR"
 OUTPUT_APP="$REPOSITORY_DIR/release/Control Module.app"
 RUNTIME_DIR=""
+INSTANCE_ID=""
 SIGN_APP=1
 SOURCE_LAUNCHER="$SCRIPT_DIR/Launch.applescript"
 
 usage() {
-  print -- "Usage: $0 [--source DIR] [--output APP] [--runtime DIR] [--no-sign]"
+  print -- "Usage: $0 [--source DIR] [--output APP] [--runtime DIR] [--instance-id UUID] [--no-sign]"
 }
 
 while (( $# > 0 )); do
@@ -30,6 +31,11 @@ while (( $# > 0 )); do
     --runtime)
       (( $# >= 2 )) || { usage >&2; exit 2; }
       RUNTIME_DIR="$2"
+      shift 2
+      ;;
+    --instance-id)
+      (( $# >= 2 )) || { usage >&2; exit 2; }
+      INSTANCE_ID="$2"
       shift 2
       ;;
     --no-sign)
@@ -56,8 +62,14 @@ if [[ ! -f "$SOURCE_DIR/package.json" || ! -x "$SOURCE_DIR/ControlModule" || ! -
   exit 1
 fi
 
-if [[ "${OUTPUT_APP:t}" != "Control Module.app" ]]; then
-  print -u2 -- "The output must be an app named Control Module.app."
+if [[ "${OUTPUT_APP:t}" != "Control Module.app" ]] \
+  && ! print -r -- "${OUTPUT_APP:t}" | /usr/bin/grep -Eq '^Control Module [a-f0-9]{8}\.app$'; then
+  print -u2 -- "The output must be named Control Module.app or use its eight-character installation suffix."
+  exit 1
+fi
+if [[ -n "$INSTANCE_ID" ]] \
+  && ! print -r -- "$INSTANCE_ID" | /usr/bin/grep -Eq '^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$'; then
+  print -u2 -- "The internal installation marker must be a lowercase UUIDv4."
   exit 1
 fi
 
@@ -88,6 +100,11 @@ trap cleanup EXIT HUP INT TERM
 /bin/chmod 755 "$STAGING_APP/Contents/Resources/ControlModule"
 /bin/cp "$SOURCE_DIR/support/mac/App.plist" "$STAGING_APP/Contents/Info.plist"
 /bin/cp "$SOURCE_DIR/support/mac/App.icns" "$STAGING_APP/Contents/Resources/ControlModule.icns"
+if [[ -n "$INSTANCE_ID" ]]; then
+  print -r -- "$INSTANCE_ID" > "$STAGING_APP/Contents/Resources/instance-id"
+  /bin/chmod 600 "$STAGING_APP/Contents/Resources/instance-id"
+  /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier io.github.mitchell-mos.control-module.instance.$INSTANCE_ID" "$STAGING_APP/Contents/Info.plist"
+fi
 
 APPLET_EXECUTABLE="$STAGING_APP/Contents/MacOS/applet"
 ARM_APPLET="$STAGING_ROOT/applet-arm64"
@@ -118,7 +135,7 @@ if [[ -x /usr/bin/xattr ]]; then
 fi
 if (( SIGN_APP )) && [[ -x /usr/bin/codesign ]]; then
   /usr/bin/codesign --force --deep --sign - "$STAGING_APP" >/dev/null
-  /usr/bin/codesign --verify --deep "$STAGING_APP"
+  /usr/bin/codesign --verify --deep --strict "$STAGING_APP"
 fi
 
 BACKUP_APP=""
@@ -135,6 +152,11 @@ if ! /bin/mv "$STAGING_APP" "$OUTPUT_APP"; then
 fi
 
 if (( SIGN_APP )) && [[ -x /usr/bin/codesign ]]; then
+  # Desktop File Provider may attach external Finder metadata after this cleanup.
+  # Strict verification above validates the bundle before that filesystem metadata;
+  # this final check verifies that the installed bundle's signature is unchanged.
+  /usr/bin/xattr -d com.apple.FinderInfo "$OUTPUT_APP" 2>/dev/null || true
+  /usr/bin/xattr -d com.apple.ResourceFork "$OUTPUT_APP" 2>/dev/null || true
   /usr/bin/codesign --verify --deep "$OUTPUT_APP"
 fi
 print -- "$OUTPUT_APP"

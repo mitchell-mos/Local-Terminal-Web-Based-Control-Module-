@@ -37,6 +37,6 @@
   <key>NSHumanReadableCopyright</key>
   <string>Copyright © 2026 Mitchell Moscoso</string>
   <key>NSDesktopFolderUsageDescription</key>
-  <string>Control Module accesses its verified local checkout, private settings, and project folders you explicitly configure.</string>
+  <string>Desktop access is optional and is requested only when you enable it in Setup or start a project stored on Desktop.</string>
 </dict>
 </plist>

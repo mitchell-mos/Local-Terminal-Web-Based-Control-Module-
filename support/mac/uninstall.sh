@@ -3,12 +3,16 @@
 set -euo pipefail
 umask 077
 
-CONFIG_DIR="${CONTROL_MODULE_CONFIG_DIR:-$HOME/Library/Application Support/Control Module}"
+CONFIG_ROOT="${CONTROL_MODULE_CONFIG_ROOT:-${CONTROL_MODULE_CONFIG_DIR:-$HOME/Library/Application Support/Control Module}}"
+CONFIG_DIR=""
 SOURCE_DIR=""
 REMOVE_SOURCE=0
 DRY_RUN=0
 STOP_ONLY=0
 WEB_PORT=1025
+RUNNER_PORT=10001
+INSTANCE_ID=""
+RUNTIME_DIR=""
 
 usage() {
   print -- "Usage: $0 --source DIR [--remove-source] [--dry-run] [--stop-only]"
@@ -52,7 +56,7 @@ if [[ -z "$SOURCE_DIR" ]]; then
 fi
 
 SOURCE_DIR="${SOURCE_DIR:A}"
-CONFIG_DIR="${CONFIG_DIR:A}"
+CONFIG_ROOT="${CONFIG_ROOT:A}"
 
 if [[ ! -f "$SOURCE_DIR/package.json" \
   || ! -x "$SOURCE_DIR/ControlModule" \
@@ -70,6 +74,37 @@ case "$SOURCE_DIR" in
     ;;
 esac
 
+if [[ -r "$SOURCE_DIR/.control-module-instance" ]]; then
+  IFS= read -r INSTANCE_ID < "$SOURCE_DIR/.control-module-instance" || true
+fi
+if [[ -n "$INSTANCE_ID" ]] \
+  && ! print -r -- "$INSTANCE_ID" | /usr/bin/grep -Eq '^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$'; then
+  print -u2 -- "This folder's private installation marker is invalid. Nothing was changed."
+  exit 1
+fi
+if [[ -n "$INSTANCE_ID" ]]; then
+  CONFIG_DIR="$CONFIG_ROOT/instances/$INSTANCE_ID"
+else
+  CONFIG_DIR="$CONFIG_ROOT"
+fi
+
+if [[ ! -r "$CONFIG_DIR/project-path" && -r "$CONFIG_ROOT/project-path" ]]; then
+  legacy_source=""
+  IFS= read -r legacy_source < "$CONFIG_ROOT/project-path" || true
+  if [[ -n "$legacy_source" && "${legacy_source:A}" == "$SOURCE_DIR" ]]; then
+    CONFIG_DIR="$CONFIG_ROOT"
+  fi
+fi
+
+if [[ -r "$CONFIG_DIR/instance-id" ]]; then
+  configured_id=""
+  IFS= read -r configured_id < "$CONFIG_DIR/instance-id" || true
+  if [[ "$configured_id" != "$INSTANCE_ID" ]]; then
+    print -u2 -- "This folder does not match its private installation settings. Nothing was changed."
+    exit 1
+  fi
+fi
+
 INSTANCE_IS_CONFIGURED=0
 if [[ -r "$CONFIG_DIR/project-path" ]]; then
   configured_source=""
@@ -82,16 +117,29 @@ fi
 if (( INSTANCE_IS_CONFIGURED )) && [[ -r "$CONFIG_DIR/web-port" ]]; then
   IFS= read -r WEB_PORT < "$CONFIG_DIR/web-port" || true
 fi
-if [[ "$WEB_PORT" != <-> ]] || (( WEB_PORT < 1025 || WEB_PORT > 65535 || WEB_PORT == 10001 )); then
+if (( INSTANCE_IS_CONFIGURED )) && [[ -r "$CONFIG_DIR/runner-port" ]]; then
+  IFS= read -r RUNNER_PORT < "$CONFIG_DIR/runner-port" || true
+fi
+if (( INSTANCE_IS_CONFIGURED )) && [[ -r "$CONFIG_DIR/runtime-path" ]]; then
+  IFS= read -r RUNTIME_DIR < "$CONFIG_DIR/runtime-path" || true
+fi
+[[ -n "$RUNTIME_DIR" ]] && RUNTIME_DIR="${RUNTIME_DIR:A}"
+if [[ "$WEB_PORT" != <-> ]] || (( WEB_PORT < 1025 || WEB_PORT > 65535 )); then
   print -u2 -- "The configured dashboard port is invalid. Nothing was changed."
   exit 1
 fi
+if [[ "$RUNNER_PORT" != <-> ]] || (( RUNNER_PORT < 1025 || RUNNER_PORT > 65535 || RUNNER_PORT == WEB_PORT )); then
+  print -u2 -- "The configured runner port is invalid. Nothing was changed."
+  exit 1
+fi
 
-process_uses_source() {
+process_uses_instance() {
   local process_id="$1"
   local process_cwd
   process_cwd="$(/usr/sbin/lsof -a -p "$process_id" -d cwd -Fn 2>/dev/null | /usr/bin/sed -n 's/^n//p' | /usr/bin/head -1 || true)"
-  [[ -n "$process_cwd" && "${process_cwd:A}" == "$SOURCE_DIR" ]]
+  [[ -n "$process_cwd" ]] || return 1
+  process_cwd="${process_cwd:A}"
+  [[ "$process_cwd" == "$SOURCE_DIR" || ( -n "$RUNTIME_DIR" && "$process_cwd" == "$RUNTIME_DIR" ) ]]
 }
 
 wait_for_process_to_stop() {
@@ -111,7 +159,7 @@ stop_owned_listener() {
   process_id="$(/usr/sbin/lsof -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null | /usr/bin/head -1 || true)"
   [[ -n "$process_id" ]] || return 0
 
-  if ! process_uses_source "$process_id"; then
+  if ! process_uses_instance "$process_id"; then
     return 0
   fi
 
@@ -124,12 +172,13 @@ stop_owned_listener() {
 
 stop_this_instance() {
   (( INSTANCE_IS_CONFIGURED )) || return 0
-  stop_owned_listener 10001 "command runner"
+  stop_owned_listener "$RUNNER_PORT" "command runner"
   stop_owned_listener "$WEB_PORT" "dashboard"
 }
 
 if (( DRY_RUN )); then
   print -- "Control Module uninstall preview"
+  [[ -n "$INSTANCE_ID" ]] && print -- "Private installation marker: verified"
   if (( REMOVE_SOURCE )); then
     print -- "Folder to move to Trash: $SOURCE_DIR"
   else
@@ -146,7 +195,7 @@ fi
 
 stop_this_instance
 if (( STOP_ONLY )); then
-  print -- "This Control Module instance was stopped safely."
+  print -- "This Control Module installation was stopped safely."
   exit 0
 fi
 

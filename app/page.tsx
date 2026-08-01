@@ -66,6 +66,17 @@ type StopAllResult = {
   errors: string[];
 };
 
+type SystemSettings = {
+  webPort: number;
+  desktopAccess: "private" | "desktop";
+  desktopShortcut: boolean;
+  installLocation: string;
+  settingsAvailable: boolean;
+  uninstallAvailable: boolean;
+};
+
+type NativeAppPrompt = "settings" | "uninstall";
+
 type ThemeColors = {
   background: string;
   surface: string;
@@ -110,7 +121,6 @@ type FilterSelectProps<T extends string> = {
   onChange: (value: T) => void;
 };
 
-const API_BASE = "http://127.0.0.1:10001";
 const LEGACY_STORAGE_KEY = "control-module-projects-v1";
 const IMPORTED_KEY = "control-module-projects-imported-v2";
 const THEME_KEY = "control-module-theme";
@@ -118,7 +128,6 @@ const CUSTOM_THEMES_KEY = "control-module-custom-themes-v1";
 const SELECTED_THEMES_KEY = "control-module-selected-themes-v1";
 const PROJECT_VIEW_KEY = "control-module-project-view";
 const SCROLL_POSITION_KEY = "control-module-scroll-position";
-const RUNNER_TOKEN_KEY = "control-module-runner-token";
 const PRIMARY_HOST: Host = "127.0.0.1";
 const ACTION_RATE_LIMIT_MS = 1000;
 const DEFAULT_THEME_ID = "default";
@@ -644,32 +653,23 @@ function getErrorMessage(error: unknown, fallback: string) {
   return error.message || fallback;
 }
 
-function initializeRunnerSession() {
+function cleanLegacyDashboardUrl() {
   const url = new URL(window.location.href);
-  const fragment = new URLSearchParams(url.hash.replace(/^#/, ""));
-  const tokenFromLauncher = fragment.get("token")?.trim() || "";
-  if (tokenFromLauncher) {
-    window.sessionStorage.setItem(RUNNER_TOKEN_KEY, tokenFromLauncher);
-    url.hash = "";
-    window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}`);
-  }
-}
-
-function getRunnerToken() {
-  const token = window.sessionStorage.getItem(RUNNER_TOKEN_KEY)?.trim() || "";
-  if (!token) {
-    throw new Error("Open Control Module with its launcher to create a private local session.");
-  }
-  return token;
+  url.hash = "";
+  url.searchParams.delete("instance");
+  url.searchParams.delete("runner");
+  window.sessionStorage.removeItem("control-module-runner-token");
+  window.sessionStorage.removeItem("control-module-runner-port");
+  window.sessionStorage.removeItem("control-module-instance-id");
+  window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}`);
 }
 
 async function apiRequest<T>(path: string, options?: RequestInit): Promise<T> {
-  const response = await fetch(`${API_BASE}${path}`, {
+  const response = await fetch(path, {
     ...options,
     cache: "no-store",
     headers: {
       ...(options?.body ? { "Content-Type": "application/json" } : {}),
-      "X-Control-Token": getRunnerToken(),
       ...options?.headers,
     },
   });
@@ -818,6 +818,11 @@ export default function Home() {
   const [themeEditorError, setThemeEditorError] = useState("");
   const [confirmThemeDelete, setConfirmThemeDelete] = useState(false);
   const [themePreferencesLoaded, setThemePreferencesLoaded] = useState(false);
+  const [appSettingsOpen, setAppSettingsOpen] = useState(false);
+  const [systemSettings, setSystemSettings] = useState<SystemSettings | null>(null);
+  const [systemSettingsLoading, setSystemSettingsLoading] = useState(false);
+  const [nativeAppPrompt, setNativeAppPrompt] = useState<NativeAppPrompt | null>(null);
+  const [nativeAppOpening, setNativeAppOpening] = useState(false);
   const [error, setError] = useState("");
   const [portFeedback, setPortFeedback] = useState<PortFeedback | null>(null);
   const [suggestedPort, setSuggestedPort] = useState<number | null>(null);
@@ -851,6 +856,7 @@ export default function Home() {
   const scrollRestored = useRef(false);
   const pendingScrollPosition = useRef<number | null>(null);
   const dialogReturnFocusRef = useRef<HTMLElement | null>(null);
+  const appSettingsDialogRef = useRef<HTMLElement | null>(null);
 
   const editingProject = editingId
     ? projects.find((project) => project.id === editingId) || null
@@ -1114,7 +1120,14 @@ export default function Home() {
   }, []);
 
   const modalDialogOpen = Boolean(
-    projectToDelete || stopAllOpen || projectInfoId || editingId || themeEditorOpen || restartPromptProject,
+    projectToDelete
+      || stopAllOpen
+      || projectInfoId
+      || editingId
+      || themeEditorOpen
+      || restartPromptProject
+      || appSettingsOpen
+      || nativeAppPrompt,
   );
 
   useEffect(() => {
@@ -1166,8 +1179,13 @@ export default function Home() {
   }, [modalDialogOpen]);
 
   useEffect(() => {
+    if (!appSettingsOpen) return;
+    window.requestAnimationFrame(() => appSettingsDialogRef.current?.focus());
+  }, [appSettingsOpen]);
+
+  useEffect(() => {
     async function initialize() {
-      initializeRunnerSession();
+      cleanLegacyDashboardUrl();
       const remoteProjects = await loadProjects(true);
       if (!remoteProjects) {
         setIsReady(true);
@@ -1230,7 +1248,7 @@ export default function Home() {
   }, [loadProjects]);
 
   useEffect(() => {
-    if (!projectToDelete && !stopAllOpen && !filtersOpen && !projectInfoId && !editingId && !themeEditorOpen && !restartPromptProject) return;
+    if (!projectToDelete && !stopAllOpen && !filtersOpen && !projectInfoId && !editingId && !themeEditorOpen && !restartPromptProject && !appSettingsOpen && !nativeAppPrompt) return;
     function closeOnEscape(event: KeyboardEvent) {
       if (event.key === "Escape") {
         setProjectToDelete(null);
@@ -1241,6 +1259,10 @@ export default function Home() {
         setThemeEditorOpen(false);
         setConfirmThemeDelete(false);
         setThemeEditorError("");
+        if (!nativeAppOpening) {
+          setNativeAppPrompt(null);
+          setAppSettingsOpen(false);
+        }
         if (restartPromptProject) {
           setRestartPromptProject(null);
           window.requestAnimationFrame(() => restartTriggerRef.current?.focus());
@@ -1250,7 +1272,7 @@ export default function Home() {
     }
     window.addEventListener("keydown", closeOnEscape);
     return () => window.removeEventListener("keydown", closeOnEscape);
-  }, [editingId, filtersOpen, isStoppingAll, projectInfoId, projectToDelete, restartPromptProject, stopAllOpen, themeEditorOpen]);
+  }, [appSettingsOpen, editingId, filtersOpen, isStoppingAll, nativeAppOpening, nativeAppPrompt, projectInfoId, projectToDelete, restartPromptProject, stopAllOpen, themeEditorOpen]);
 
   useEffect(() => {
     if (!filtersOpen) return;
@@ -1373,6 +1395,10 @@ export default function Home() {
   const selectedThemeIsCustom = Boolean(
     themeEditorThemes.some((item) => item.id === selectedThemeIds[themeEditorMode]),
   );
+  const selectedAppearanceTheme = customThemes.find((item) => (
+    item.id === selectedThemeIds[theme] && item.mode === theme
+  )) || getBuiltInTheme(theme, selectedThemeIds[theme]);
+  const selectedAppearanceName = selectedAppearanceTheme?.name || "Default";
   const themeColorsValid = THEME_COLOR_FIELDS.every(({ key }) => (
     HEX_COLOR_PATTERN.test(themeColors[key])
   ));
@@ -1406,6 +1432,76 @@ export default function Home() {
     setThemeEditorOpen(false);
     setThemeEditorError("");
     setConfirmThemeDelete(false);
+  }
+
+  async function openAppSettings() {
+    setAppSettingsOpen(true);
+    setSystemSettingsLoading(true);
+    try {
+      const settings = await apiRequest<SystemSettings>("/api/system/settings");
+      setSystemSettings(settings);
+    } catch (requestError) {
+      setSystemSettings(null);
+      notify(
+        "error",
+        "Settings unavailable",
+        getErrorMessage(requestError, "The local settings could not be loaded."),
+      );
+    } finally {
+      setSystemSettingsLoading(false);
+    }
+  }
+
+  function closeAppSettings() {
+    setAppSettingsOpen(false);
+  }
+
+  function openThemeEditorFromSettings() {
+    setAppSettingsOpen(false);
+    window.requestAnimationFrame(openThemeEditor);
+  }
+
+  function promptForNativeApp(kind: NativeAppPrompt) {
+    setAppSettingsOpen(false);
+    setNativeAppPrompt(kind);
+  }
+
+  function closeNativeAppPrompt() {
+    if (nativeAppOpening) return;
+    setNativeAppPrompt(null);
+    setAppSettingsOpen(true);
+  }
+
+  async function openNativeApp() {
+    if (!nativeAppPrompt || nativeAppOpening) return;
+    if (!beginRateLimitedAction()) return;
+    const kind = nativeAppPrompt;
+    setNativeAppOpening(true);
+    try {
+      await apiRequest<{ opened: boolean }>(
+        kind === "settings" ? "/api/system/open-settings" : "/api/system/open-uninstall",
+        {
+          method: "POST",
+          body: JSON.stringify(kind === "uninstall" ? { confirmed: true } : {}),
+        },
+      );
+      setNativeAppPrompt(null);
+      notify(
+        "success",
+        kind === "settings" ? "Settings opened" : "Uninstall opened",
+        kind === "settings"
+          ? "Use the native app to apply Control Module settings."
+          : "The native app will ask once more before moving this copy to Trash.",
+      );
+    } catch (requestError) {
+      notify(
+        "error",
+        kind === "settings" ? "Settings could not open" : "Uninstall could not open",
+        getErrorMessage(requestError, "The verified native app could not be opened."),
+      );
+    } finally {
+      setNativeAppOpening(false);
+    }
   }
 
   function changeThemeEditorMode(mode: Theme) {
@@ -2302,6 +2398,17 @@ export default function Home() {
               Stop<span className="header-action-scope">-{selectionMode ? "selected" : "all"}</span>
             </button>
           </div>
+          <button
+            className="button settings-button"
+            type="button"
+            onClick={() => void openAppSettings()}
+            aria-haspopup="dialog"
+            disabled={!runnerOnline}
+            title={!runnerOnline ? "Start Control Module before opening settings" : "Settings"}
+          >
+            <span className="action-icon settings-icon" aria-hidden="true" />
+            Settings
+          </button>
           <div className="header-appearance-actions" role="group" aria-label="Appearance">
             <button
               className="theme-button"
@@ -2310,7 +2417,7 @@ export default function Home() {
               aria-label="Open custom themes"
               title="Custom themes"
             >
-              <span className="action-icon theme-settings-icon" aria-hidden="true" />
+              <span className="action-icon palette-icon" aria-hidden="true" />
             </button>
             <button
               className="theme-button"
@@ -2841,6 +2948,175 @@ export default function Home() {
           </div>
         )}
       </section>
+
+      {appSettingsOpen && (
+        <div
+          className="modal-backdrop"
+          onMouseDown={(event) => {
+            if (event.currentTarget === event.target) closeAppSettings();
+          }}
+        >
+          <section
+            ref={appSettingsDialogRef}
+            className="edit-project-modal app-settings-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="app-settings-title"
+            tabIndex={-1}
+          >
+            <div className="edit-project-modal-header">
+              <div>
+                <h2 id="app-settings-title">Settings</h2>
+                <p className="theme-modal-note">Local settings for this installation.</p>
+              </div>
+              <button
+                className="filter-close-button"
+                type="button"
+                onClick={closeAppSettings}
+                aria-label="Close settings"
+              >
+                <span className="action-icon close-icon" aria-hidden="true" />
+              </button>
+            </div>
+
+            {systemSettingsLoading ? (
+              <div className="settings-loading" role="status">
+                <span className="action-icon restart-loader-icon" aria-hidden="true" />
+                Loading local settings…
+              </div>
+            ) : systemSettings ? (
+              <>
+                <div className="settings-group">
+                  <h3>General</h3>
+                  <dl className="settings-list">
+                    <div>
+                      <dt>Dashboard</dt>
+                      <dd><code>127.0.0.1:{systemSettings.webPort}</code></dd>
+                    </div>
+                    <div>
+                      <dt>Source mode</dt>
+                      <dd>
+                        {systemSettings.desktopAccess === "private"
+                          ? "Private working copy"
+                          : "Desktop checkout"}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>Desktop shortcut</dt>
+                      <dd>{systemSettings.desktopShortcut ? "On" : "Off"}</dd>
+                    </div>
+                    <div>
+                      <dt>Installed in</dt>
+                      <dd>{systemSettings.installLocation}</dd>
+                    </div>
+                  </dl>
+                </div>
+
+                <div className="settings-group settings-appearance-row">
+                  <div>
+                    <h3>Appearance</h3>
+                    <p>{theme === "light" ? "Light" : "Dark"} mode · {selectedAppearanceName}</p>
+                  </div>
+                  <button className="button" type="button" onClick={openThemeEditorFromSettings}>
+                    Customize
+                  </button>
+                </div>
+
+                <div className="settings-native-callout">
+                  <div>
+                    <strong>Port, source, and installation</strong>
+                    <p>
+                      The verified native Setup app applies these changes safely. Source mode does not grant
+                      or revoke macOS permission; review Files &amp; Folders access in System Settings.
+                    </p>
+                  </div>
+                  <button
+                    className="button primary settings-open-button"
+                    type="button"
+                    onClick={() => promptForNativeApp("settings")}
+                    disabled={!systemSettings.settingsAvailable}
+                  >
+                    Open app settings
+                    <span className="action-icon external-link-icon" aria-hidden="true" />
+                  </button>
+                </div>
+
+                <div className="settings-danger-zone">
+                  <div>
+                    <h3>Uninstall</h3>
+                    <p>Move only this verified Control Module folder to Trash.</p>
+                  </div>
+                  <button
+                    className="button quiet-danger settings-uninstall-button"
+                    type="button"
+                    onClick={() => promptForNativeApp("uninstall")}
+                    disabled={!systemSettings.uninstallAvailable}
+                  >
+                    Uninstall this copy…
+                  </button>
+                </div>
+              </>
+            ) : (
+              <div className="settings-unavailable" role="alert">
+                <strong>Local settings are unavailable.</strong>
+                <p>Reopen Control Module from its app, then try again.</p>
+              </div>
+            )}
+          </section>
+        </div>
+      )}
+
+      {nativeAppPrompt && (
+        <div
+          className="modal-backdrop"
+          onMouseDown={(event) => {
+            if (event.currentTarget === event.target) closeNativeAppPrompt();
+          }}
+        >
+          <section
+            className="delete-modal native-app-prompt"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="native-app-prompt-title"
+            aria-describedby="native-app-prompt-description"
+          >
+            <h2 id="native-app-prompt-title">
+              {nativeAppPrompt === "settings" ? "Open app settings?" : "Open Uninstall?"}
+            </h2>
+            <p id="native-app-prompt-description">
+              {nativeAppPrompt === "settings"
+                ? "This opens the verified native Setup app, where you can change the dashboard port, Desktop access, install location, and shortcut."
+                : "This opens the verified native Uninstall app. It will ask you again before moving this Control Module folder to Trash."}
+            </p>
+            <div className="stop-all-safety">
+              {nativeAppPrompt === "settings"
+                ? "Changing the dashboard port restarts only this Control Module installation. Source mode does not change permission grants; review those in macOS System Settings."
+                : "Other Control Module copies, external projects, saved databases, and unrelated files are not removed."}
+            </div>
+            <div className="modal-actions">
+              <button
+                className="button"
+                type="button"
+                onClick={closeNativeAppPrompt}
+                disabled={nativeAppOpening}
+                autoFocus
+              >
+                Stay here
+              </button>
+              <button
+                className={`button ${nativeAppPrompt === "uninstall" ? "delete-confirm" : "primary"}`}
+                type="button"
+                onClick={() => void openNativeApp()}
+                disabled={nativeAppOpening || actionCooldownActive}
+              >
+                {nativeAppOpening
+                  ? "Opening…"
+                  : nativeAppPrompt === "settings" ? "Open settings" : "Open Uninstall"}
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
 
       {restartPromptProject && (
         <div

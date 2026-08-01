@@ -1,5 +1,6 @@
 # Local project data and private runtime state
 /.control-module-data/
+/.control-module-instance
 /control-projects.json
 /control-projects.corrupt-*.json
 /control-logs/

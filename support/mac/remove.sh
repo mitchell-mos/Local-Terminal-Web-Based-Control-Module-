@@ -83,11 +83,16 @@ done
 /usr/bin/xattr -cr "$STAGING_APP"
 /usr/bin/xattr -d com.apple.FinderInfo "$STAGING_APP" 2>/dev/null || true
 /usr/bin/codesign --force --deep --sign - "$STAGING_APP" >/dev/null
-/usr/bin/codesign --verify --deep "$STAGING_APP"
+/usr/bin/codesign --verify --deep --strict "$STAGING_APP"
 
 if [[ -e "$OUTPUT_APP" ]]; then
   /bin/mv "$OUTPUT_APP" "$STAGING_ROOT/previous-Uninstall.app"
 fi
 /bin/mv "$STAGING_APP" "$OUTPUT_APP"
+# Desktop File Provider may attach external Finder metadata after this cleanup.
+# Strict verification above validates the bundle before that filesystem metadata;
+# this final check verifies that the installed bundle's signature is unchanged.
+/usr/bin/xattr -d com.apple.FinderInfo "$OUTPUT_APP" 2>/dev/null || true
+/usr/bin/xattr -d com.apple.ResourceFork "$OUTPUT_APP" 2>/dev/null || true
 /usr/bin/codesign --verify --deep "$OUTPUT_APP"
 print -- "$OUTPUT_APP"

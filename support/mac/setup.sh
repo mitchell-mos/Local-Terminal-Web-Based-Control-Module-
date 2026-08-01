@@ -77,19 +77,24 @@ for privacy_key in \
 done
 /usr/libexec/PlistBuddy -c "Add :LSMinimumSystemVersion string 13.0" "$STAGING_APP/Contents/Info.plist" 2>/dev/null \
   || /usr/libexec/PlistBuddy -c "Set :LSMinimumSystemVersion 13.0" "$STAGING_APP/Contents/Info.plist"
-/usr/libexec/PlistBuddy -c "Add :NSDesktopFolderUsageDescription string Setup accesses only the Control Module project folder that contains this app." "$STAGING_APP/Contents/Info.plist" 2>/dev/null \
-  || /usr/libexec/PlistBuddy -c "Set :NSDesktopFolderUsageDescription Setup accesses only the Control Module project folder that contains this app." "$STAGING_APP/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Add :NSDesktopFolderUsageDescription string Setup reads only its verified Control Module download so you can choose whether the installed app uses Desktop." "$STAGING_APP/Contents/Info.plist" 2>/dev/null \
+  || /usr/libexec/PlistBuddy -c "Set :NSDesktopFolderUsageDescription Setup reads only its verified Control Module download so you can choose whether the installed app uses Desktop." "$STAGING_APP/Contents/Info.plist"
 
 /usr/bin/touch "$STAGING_APP"
 /usr/bin/xattr -cr "$STAGING_APP"
 /usr/bin/xattr -d com.apple.FinderInfo "$STAGING_APP" 2>/dev/null || true
 /usr/bin/codesign --force --deep --sign - "$STAGING_APP" >/dev/null
-/usr/bin/codesign --verify --deep "$STAGING_APP"
+/usr/bin/codesign --verify --deep --strict "$STAGING_APP"
 
 if [[ -e "$OUTPUT_APP" ]]; then
   PREVIOUS_APP="$STAGING_ROOT/previous-Setup.app"
   /bin/mv "$OUTPUT_APP" "$PREVIOUS_APP"
 fi
 /bin/mv "$STAGING_APP" "$OUTPUT_APP"
+# Desktop File Provider may attach external Finder metadata after this cleanup.
+# Strict verification above validates the bundle before that filesystem metadata;
+# this final check verifies that the installed bundle's signature is unchanged.
+/usr/bin/xattr -d com.apple.FinderInfo "$OUTPUT_APP" 2>/dev/null || true
+/usr/bin/xattr -d com.apple.ResourceFork "$OUTPUT_APP" 2>/dev/null || true
 /usr/bin/codesign --verify --deep "$OUTPUT_APP"
 print -- "$OUTPUT_APP"

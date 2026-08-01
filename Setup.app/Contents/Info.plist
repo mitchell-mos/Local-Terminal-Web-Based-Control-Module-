@@ -31,7 +31,7 @@
 	<key>LSRequiresNativeExecution</key>
 	<true/>
 	<key>NSDesktopFolderUsageDescription</key>
-	<string>Setup accesses only the Control Module project folder that contains this app.</string>
+	<string>Setup reads only its verified Control Module download so you can choose whether the installed app uses Desktop.</string>
 	<key>OSAAppletShowStartupScreen</key>
 	<false/>
 </dict>

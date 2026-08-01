@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import plistlib
 import re
 import secrets
 import signal
@@ -19,7 +20,6 @@ from typing import Any
 
 
 HOST = "127.0.0.1"
-PORT = 10001
 MIN_PROJECT_PORT = 1026
 MAX_PROJECT_PORT = 9999
 GRACEFUL_STOP_SECONDS = 5.0
@@ -32,6 +32,20 @@ LOG_MAX_BYTES = 2 * 1024 * 1024
 LOG_BACKUP_COUNT = 3
 REQUEST_TIMEOUT_SECONDS = 10.0
 MAX_REQUEST_THREADS = 24
+
+
+def configured_runner_port() -> int:
+    """Read this instance's private runner port."""
+    try:
+        candidate = int(os.environ.get("CONTROL_MODULE_RUNNER_PORT", "10001"))
+    except ValueError:
+        return 10001
+    if not 1025 <= candidate <= 65535:
+        return 10001
+    return candidate
+
+
+PORT = configured_runner_port()
 
 
 def configured_web_port() -> int:
@@ -58,7 +72,7 @@ ALLOWED_ORIGINS = {
     f"http://127.0.0.1:{WEB_PORT}",
     f"http://localhost:{WEB_PORT}",
 }
-ALLOWED_HOSTS = {"127.0.0.1:10001", "localhost:10001"}
+ALLOWED_HOSTS = {f"127.0.0.1:{PORT}", f"localhost:{PORT}"}
 SAFE_ENVIRONMENT_KEYS = {
     "LANG",
     "LC_ALL",
@@ -79,6 +93,14 @@ HEALTHY_PROJECTS: set[str] = set()
 LAST_ACTIONS: dict[str, float] = {}
 SESSION_TOKEN = ""
 PROJECT_DATA_BACKUP: Path | None = None
+NATIVE_APP_IDENTIFIERS = {
+    "settings": "io.github.mitchell-mos.control-module.setup",
+    "uninstall": "io.github.mitchell-mos.control-module.uninstall",
+}
+NATIVE_APP_NAMES = {
+    "settings": "Setup.app",
+    "uninstall": "Uninstall.app",
+}
 
 
 class RateLimitError(Exception):
@@ -87,6 +109,110 @@ class RateLimitError(Exception):
 
 class ProjectDataError(Exception):
     """Raised when saved project data cannot be read safely."""
+
+
+def configured_instance_id() -> str:
+    candidate = os.environ.get("CONTROL_MODULE_INSTANCE_ID", "").strip()
+    if not re.fullmatch(
+        r"[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}",
+        candidate,
+    ):
+        return ""
+    return candidate
+
+
+def configured_source_dir() -> Path | None:
+    candidate = os.environ.get("CONTROL_MODULE_SOURCE_DIR", "").strip()
+    if not candidate:
+        return None
+    source = Path(candidate).expanduser().resolve()
+    try:
+        package = json.loads((source / "package.json").read_text(encoding="utf-8"))
+        marker = (source / ".control-module-instance").read_text(encoding="utf-8").strip()
+    except (OSError, json.JSONDecodeError):
+        return None
+    if package.get("name") != "control-module" or marker != configured_instance_id():
+        return None
+    return source
+
+
+def configured_settings_dir() -> Path | None:
+    candidate = os.environ.get("CONTROL_MODULE_CONFIG_DIR", "").strip()
+    if not candidate:
+        return None
+    settings = Path(candidate).expanduser().resolve()
+    try:
+        saved_instance = (settings / "instance-id").read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    if saved_instance != configured_instance_id():
+        return None
+    return settings
+
+
+def verified_native_app_path(kind: str) -> Path | None:
+    app_name = NATIVE_APP_NAMES.get(kind)
+    expected_identifier = NATIVE_APP_IDENTIFIERS.get(kind)
+    source = configured_source_dir()
+    if not app_name or not expected_identifier or source is None:
+        return None
+    candidate = source / app_name
+    if candidate.is_symlink() or not candidate.is_dir():
+        return None
+    try:
+        info_path = candidate / "Contents" / "Info.plist"
+        with info_path.open("rb") as info_file:
+            info = plistlib.load(info_file)
+    except (OSError, plistlib.InvalidFileException):
+        return None
+    if info.get("CFBundleIdentifier") != expected_identifier:
+        return None
+    return candidate
+
+
+def read_private_setting(name: str, default: str = "") -> str:
+    settings = configured_settings_dir()
+    if settings is None:
+        return default
+    try:
+        return (settings / name).read_text(encoding="utf-8").strip() or default
+    except OSError:
+        return default
+
+
+def system_settings_view() -> dict[str, Any]:
+    access_mode = read_private_setting("desktop-access", "private")
+    if access_mode not in {"private", "desktop"}:
+        access_mode = "private"
+    shortcut_enabled = bool(read_private_setting("shortcut-path"))
+    install_path = read_private_setting("install-path")
+    install_location = "Personal Applications" if "/Applications/" in install_path else "Control Module folder"
+    native_apps_configured = bool(configured_instance_id() and os.environ.get("CONTROL_MODULE_SOURCE_DIR", "").strip())
+    return {
+        "webPort": WEB_PORT,
+        "desktopAccess": access_mode,
+        "desktopShortcut": shortcut_enabled,
+        "installLocation": install_location,
+        "settingsAvailable": sys.platform == "darwin" and native_apps_configured,
+        "uninstallAvailable": sys.platform == "darwin" and native_apps_configured,
+    }
+
+
+def open_verified_native_app(kind: str) -> None:
+    if sys.platform != "darwin":
+        raise OSError("Native Control Module settings are available only on macOS.")
+    application = verified_native_app_path(kind)
+    if application is None:
+        raise ValueError(f"The verified {kind} app could not be found. Run Setup from this Control Module folder.")
+    enforce_action_rate_limit([f"system:{kind}"])
+    subprocess.run(
+        ["/usr/bin/open", str(application)],
+        check=True,
+        timeout=10,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
 
 
 def enforce_action_rate_limit(project_ids: list[str]) -> None:
@@ -744,6 +870,12 @@ class ControlHandler(BaseHTTPRequestHandler):
             except ProjectDataError as error:
                 self.send_json(500, {"error": str(error)})
             return
+        if self.path == "/api/system/settings":
+            if not self.request_allowed():
+                self.send_json(403, {"error": "This runner only accepts requests from Control Module."})
+                return
+            self.send_json(200, system_settings_view())
+            return
         self.send_json(404, {"error": "Not found."})
 
     def do_POST(self) -> None:
@@ -767,6 +899,14 @@ class ControlHandler(BaseHTTPRequestHandler):
                 self.stop_project(payload)
             elif self.path == "/api/projects/stop-all":
                 self.stop_all_projects()
+            elif self.path == "/api/system/open-settings":
+                open_verified_native_app("settings")
+                self.send_json(200, {"opened": True})
+            elif self.path == "/api/system/open-uninstall":
+                if payload.get("confirmed") is not True:
+                    raise ValueError("Confirm before opening Uninstall.")
+                open_verified_native_app("uninstall")
+                self.send_json(200, {"opened": True})
             else:
                 self.send_json(404, {"error": "Not found."})
         except RateLimitError as error:

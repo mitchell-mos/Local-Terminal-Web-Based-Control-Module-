@@ -89,6 +89,17 @@ class ControlServerTests(unittest.TestCase):
                 "first-project,second-project,third-project",
             )
 
+    def test_action_rate_limit_is_scoped_to_each_project(self) -> None:
+        with mock.patch.object(control_server.time, "monotonic", return_value=100.0):
+            control_server.enforce_action_rate_limit(["first-project"])
+            control_server.enforce_action_rate_limit(["second-project"])
+
+            with self.assertRaisesRegex(control_server.RateLimitError, "one second"):
+                control_server.enforce_action_rate_limit(["first-project"])
+
+        self.assertEqual(control_server.LAST_ACTIONS["first-project"], 100.0)
+        self.assertEqual(control_server.LAST_ACTIONS["second-project"], 100.0)
+
     def test_corrupt_data_is_preserved_and_reported(self) -> None:
         control_server.ensure_private_directory(control_server.PROJECTS_FILE.parent)
         control_server.PROJECTS_FILE.write_text("not-json", encoding="utf-8")

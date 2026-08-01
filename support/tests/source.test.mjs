@@ -14,12 +14,13 @@ async function read(path) {
 }
 
 test("does not ship private user data or unrelated runtime state", async () => {
-  const [runner, launcher, page, packageJson, proxy] = await Promise.all([
+  const [runner, launcher, page, packageJson, proxy, restartIcon] = await Promise.all([
     read("server/control_server.py"),
     read("ControlModule"),
     read("app/page.tsx"),
     read("package.json"),
     read("proxy.ts"),
+    read("public/icons/restart-loader.svg"),
   ]);
   const publicSource = `${runner}\n${launcher}\n${page}\n${packageJson}\n${proxy}`;
 
@@ -79,6 +80,10 @@ test("does not ship private user data or unrelated runtime state", async () => {
   assert.match(page, /Published site/);
   assert.match(page, /projectDropTargetRef/);
   assert.match(page, /setDragImage/);
+  assert.match(page, /beginProjectRateLimitedAction\(project\.id\)/);
+  assert.match(page, /projectCooldownIds/);
+  assert.match(page, /busyProjectIds/);
+  assert.match(restartIcon, /M21 3v5h-5/);
   assert.match(proxy, /runtime", "session-token/);
   assert.match(proxy, /"X-Control-Token": token/);
   assert.match(proxy, /sec-fetch-site/);

@@ -1011,7 +1011,7 @@ export default function Home() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [isReady, setIsReady] = useState(false);
   const [runnerOnline, setRunnerOnline] = useState(false);
-  const [busyId, setBusyId] = useState<string | null>(null);
+  const [busyProjectIds, setBusyProjectIds] = useState<Record<string, boolean>>({});
   const [restartingIds, setRestartingIds] = useState<Record<string, boolean>>({});
   const [projectToDelete, setProjectToDelete] = useState<Project | null>(null);
   const [deleteConfirmation, setDeleteConfirmation] = useState("");
@@ -1070,6 +1070,7 @@ export default function Home() {
   const [isStartingAll, setIsStartingAll] = useState(false);
   const [isStoppingAll, setIsStoppingAll] = useState(false);
   const [actionCooldownActive, setActionCooldownActive] = useState(false);
+  const [projectCooldownIds, setProjectCooldownIds] = useState<Record<string, boolean>>({});
   const [toasts, setToasts] = useState<Toast[]>([]);
   const statusSnapshot = useRef<Record<string, boolean>>({});
   const expectedStops = useRef<Set<string>>(new Set());
@@ -1086,6 +1087,8 @@ export default function Home() {
   const restartTriggerRef = useRef<HTMLButtonElement | null>(null);
   const lastActionAt = useRef(0);
   const actionCooldownTimer = useRef<number | null>(null);
+  const projectActionTimes = useRef<Record<string, number>>({});
+  const projectCooldownTimers = useRef<Record<string, number>>({});
   const scrollRestored = useRef(false);
   const pendingScrollPosition = useRef<number | null>(null);
   const dialogReturnFocusRef = useRef<HTMLElement | null>(null);
@@ -1203,6 +1206,39 @@ export default function Home() {
     }, ACTION_RATE_LIMIT_MS);
     return true;
   }, [notify]);
+
+  const beginProjectRateLimitedAction = useCallback((projectId: string) => {
+    const now = Date.now();
+    const remaining = ACTION_RATE_LIMIT_MS - (now - (projectActionTimes.current[projectId] || 0));
+    if (remaining > 0) {
+      notify("info", "Please wait", "This project can run one action per second.");
+      return false;
+    }
+
+    projectActionTimes.current[projectId] = now;
+    setProjectCooldownIds((current) => ({ ...current, [projectId]: true }));
+    const existingTimer = projectCooldownTimers.current[projectId];
+    if (existingTimer) window.clearTimeout(existingTimer);
+    projectCooldownTimers.current[projectId] = window.setTimeout(() => {
+      setProjectCooldownIds((current) => {
+        const next = { ...current };
+        delete next[projectId];
+        return next;
+      });
+      delete projectCooldownTimers.current[projectId];
+    }, ACTION_RATE_LIMIT_MS);
+    return true;
+  }, [notify]);
+
+  const setProjectBusy = useCallback((projectId: string, busy: boolean) => {
+    setBusyProjectIds((current) => {
+      if (busy) return { ...current, [projectId]: true };
+      if (!(projectId in current)) return current;
+      const next = { ...current };
+      delete next[projectId];
+      return next;
+    });
+  }, []);
 
   const loadProjects = useCallback(async (showError = false) => {
     try {
@@ -1383,6 +1419,7 @@ export default function Home() {
   useEffect(() => {
     return () => {
       if (actionCooldownTimer.current) window.clearTimeout(actionCooldownTimer.current);
+      Object.values(projectCooldownTimers.current).forEach((timer) => window.clearTimeout(timer));
     };
   }, []);
 
@@ -1762,6 +1799,7 @@ export default function Home() {
   const activeFilterCount = Number(statusFilter !== "all")
     + Number(sortBy !== "manual");
   const hasProjectFilters = Boolean(portSearch || activeFilterCount);
+  const hasBusyProjects = Object.keys(busyProjectIds).length > 0;
   const canReorderProjects = runnerOnline
     && projects.length > 1
     && sortBy === "manual"
@@ -1771,7 +1809,7 @@ export default function Home() {
     && !isReorderingProjects
     && !isStartingAll
     && !isStoppingAll
-    && !busyId
+    && !hasBusyProjects
     && !actionCooldownActive;
   const reorderDisabledReason = projects.length < 2
     ? "Add another project to change the order"
@@ -1781,7 +1819,7 @@ export default function Home() {
         ? "Clear search and filters, then choose Manual order"
         : isReorderingProjects
           ? "Saving the project order"
-          : busyId || actionCooldownActive || isStartingAll || isStoppingAll
+          : hasBusyProjects || actionCooldownActive || isStartingAll || isStoppingAll
             ? "Wait for the current project action to finish"
             : "Project order is temporarily unavailable";
 
@@ -2438,14 +2476,14 @@ export default function Home() {
       notify("error", "No command", "Add a command before starting this project.");
       return;
     }
-    if (!beginRateLimitedAction()) return;
+    if (!beginProjectRateLimitedAction(project.id)) return;
     setDismissedProjectErrors((current) => {
       if (!(project.id in current)) return current;
       const next = { ...current };
       delete next[project.id];
       return next;
     });
-    setBusyId(project.id);
+    setProjectBusy(project.id, true);
     setError("");
     try {
       const result = await apiRequest<{ project: Project }>("/api/projects/start", {
@@ -2465,13 +2503,13 @@ export default function Home() {
       setError(detail);
       notify("error", `Could not start ${project.name}`, detail);
     } finally {
-      setBusyId(null);
+      setProjectBusy(project.id, false);
     }
   }
 
   async function stopProject(project: Project) {
-    if (!beginRateLimitedAction()) return;
-    setBusyId(project.id);
+    if (!beginProjectRateLimitedAction(project.id)) return;
+    setProjectBusy(project.id, true);
     setError("");
     expectedStops.current.add(project.id);
     try {
@@ -2489,7 +2527,7 @@ export default function Home() {
       setError(detail);
       notify("error", `Could not stop ${project.name}`, detail);
     } finally {
-      setBusyId(null);
+      setProjectBusy(project.id, false);
     }
   }
 
@@ -2498,10 +2536,10 @@ export default function Home() {
       notify("info", "Project is stopped", `Start ${project.name} before restarting it.`);
       return;
     }
-    if (!beginRateLimitedAction()) return;
+    if (!beginProjectRateLimitedAction(project.id)) return;
     restartTriggerRef.current = trigger || null;
     setRestartPromptProject(null);
-    setBusyId(project.id);
+    setProjectBusy(project.id, true);
     setRestartingIds((current) => ({ ...current, [project.id]: true }));
     setError("");
     expectedStops.current.add(project.id);
@@ -2530,7 +2568,7 @@ export default function Home() {
         delete next[project.id];
         return next;
       });
-      setBusyId(null);
+      setProjectBusy(project.id, false);
     }
   }
 
@@ -2916,7 +2954,7 @@ export default function Home() {
 
   async function removeProject(project: Project) {
     if (!beginRateLimitedAction()) return;
-    setBusyId(project.id);
+    setProjectBusy(project.id, true);
     try {
       await apiRequest("/api/projects/delete", {
         method: "POST",
@@ -2931,7 +2969,7 @@ export default function Home() {
       setError(detail);
       notify("error", "Delete failed", detail);
     } finally {
-      setBusyId(null);
+      setProjectBusy(project.id, false);
     }
   }
 
@@ -3523,7 +3561,7 @@ export default function Home() {
                   className="button run-all-button"
                   type="button"
                   onClick={() => void runAllProjects()}
-                  disabled={!runnerOnline || startableCount === 0 || isStartingAll || isStoppingAll || actionCooldownActive || Boolean(editingId)}
+                  disabled={!runnerOnline || startableCount === 0 || isStartingAll || isStoppingAll || hasBusyProjects || actionCooldownActive || Boolean(editingId)}
                   aria-label={isStartingAll ? "Starting projects" : "Run all projects"}
                   title={editingId
                     ? "Finish editing before starting projects"
@@ -3537,7 +3575,7 @@ export default function Home() {
                   className="button stop-all-button"
                   type="button"
                   onClick={() => setStopAllOpen(true)}
-                  disabled={!runnerOnline || stoppableCount === 0 || isStartingAll || isStoppingAll || actionCooldownActive}
+                  disabled={!runnerOnline || stoppableCount === 0 || isStartingAll || isStoppingAll || hasBusyProjects || actionCooldownActive}
                   aria-label="Stop all projects"
                   title={stoppableCount === 0
                     ? "No projects are running"
@@ -3779,7 +3817,7 @@ export default function Home() {
                 className="button run-all-button"
                 type="button"
                 onClick={() => void runAllProjects()}
-                disabled={!runnerOnline || startableCount === 0 || isStartingAll || isStoppingAll || actionCooldownActive}
+                disabled={!runnerOnline || startableCount === 0 || isStartingAll || isStoppingAll || hasBusyProjects || actionCooldownActive}
                 aria-label={isStartingAll ? "Starting selected projects" : "Run selected projects"}
                 title={selectedCount === 0
                   ? "Select at least one project"
@@ -3793,7 +3831,7 @@ export default function Home() {
                 className="button stop-all-button"
                 type="button"
                 onClick={() => setStopAllOpen(true)}
-                disabled={!runnerOnline || stoppableCount === 0 || isStartingAll || isStoppingAll || actionCooldownActive}
+                disabled={!runnerOnline || stoppableCount === 0 || isStartingAll || isStoppingAll || hasBusyProjects || actionCooldownActive}
                 aria-label="Stop selected projects"
                 title={selectedCount === 0
                   ? "Select at least one project"
@@ -3839,7 +3877,8 @@ export default function Home() {
               const url = getUrl(PRIMARY_HOST, project.port);
               const localhostUrl = getUrl("localhost", project.port);
               const isRestarting = Boolean(restartingIds[project.id]);
-              const isBusy = busyId === project.id || isRestarting;
+              const isBusy = Boolean(busyProjectIds[project.id]) || isRestarting;
+              const projectCooldownActive = Boolean(projectCooldownIds[project.id]);
               const isSelected = Boolean(selectedProjectIds[project.id]);
               const commandVisible = Boolean(visibleCommands[project.id]);
               const publishedUrl = project.publicUrl && !publishedUrlError(project.publicUrl)
@@ -3980,7 +4019,7 @@ export default function Home() {
                               className={`button project-action-toggle ${project.running ? "stop" : "start"}`}
                               type="button"
                               onClick={() => project.running ? stopProject(project) : startProject(project)}
-                              disabled={isBusy || isStartingAll || isStoppingAll || actionCooldownActive}
+                              disabled={isBusy || isStartingAll || isStoppingAll || projectCooldownActive}
                             >
                               {isBusy ? "Wait…" : project.running ? "Stop" : "Start"}
                             </button>
@@ -3988,7 +4027,7 @@ export default function Home() {
                               className="button project-action-restart"
                               type="button"
                               onClick={(event) => restartProject(project, event.currentTarget)}
-                              disabled={!project.running || isBusy || isStartingAll || isStoppingAll || actionCooldownActive}
+                              disabled={!project.running || isBusy || isStartingAll || isStoppingAll || projectCooldownActive}
                               title={project.running ? `Restart ${project.name}` : "Start the project before restarting it"}
                               aria-label={`Restart ${project.name}`}
                               aria-busy={isRestarting}
@@ -4832,7 +4871,7 @@ export default function Home() {
             <form
               onSubmit={(event) => {
                 event.preventDefault();
-                if (deleteNameMatches && busyId !== projectToDelete.id) {
+                if (deleteNameMatches && !busyProjectIds[projectToDelete.id]) {
                   void removeProject(projectToDelete);
                 }
               }}
@@ -4860,9 +4899,9 @@ export default function Home() {
                 <button
                   className="button delete-confirm"
                   type="submit"
-                  disabled={!deleteNameMatches || busyId === projectToDelete.id || actionCooldownActive}
+                  disabled={!deleteNameMatches || Boolean(busyProjectIds[projectToDelete.id]) || actionCooldownActive}
                 >
-                  {busyId === projectToDelete.id ? "Deleting…" : "Delete"}
+                  {busyProjectIds[projectToDelete.id] ? "Deleting…" : "Delete"}
                 </button>
               </div>
             </form>

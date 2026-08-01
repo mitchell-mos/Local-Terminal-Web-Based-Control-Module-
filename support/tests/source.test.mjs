@@ -100,15 +100,16 @@ test("publishes a consistent user-facing release version", async () => {
     packageVersion,
   } = await import(new URL("../version.mjs", import.meta.url));
 
-  assert.equal(label, "v1.00.0");
+  const baseline = { major: 1, update: 0, fix: 0 };
+  assert.match(label, /^v[1-9]\d*\.\d{2}\.\d+$/);
   assert.equal(formatVersion(release), label);
   assert.equal(packageMetadata.version, packageVersion(release));
-  assert.deepEqual(bumpVersion(release, "fix"), { major: 1, update: 0, fix: 1 });
-  assert.deepEqual(bumpVersion(release, "update"), { major: 1, update: 1, fix: 0 });
-  assert.deepEqual(bumpVersion(release, "major"), { major: 2, update: 0, fix: 0 });
-  assert.equal(classifyTransition(release, { major: 1, update: 0, fix: 1 }), "fix");
-  assert.equal(classifyTransition(release, { major: 1, update: 1, fix: 0 }), "update");
-  assert.equal(classifyTransition(release, { major: 2, update: 0, fix: 0 }), "major");
+  assert.deepEqual(bumpVersion(baseline, "fix"), { major: 1, update: 0, fix: 1 });
+  assert.deepEqual(bumpVersion(baseline, "update"), { major: 1, update: 1, fix: 0 });
+  assert.deepEqual(bumpVersion(baseline, "major"), { major: 2, update: 0, fix: 0 });
+  assert.equal(classifyTransition(release, bumpVersion(release, "fix")), "fix");
+  assert.equal(classifyTransition(release, bumpVersion(release, "update")), "update");
+  assert.equal(classifyTransition(release, bumpVersion(release, "major")), "major");
   assert.throws(() => classifyTransition(release, release), /must advance exactly once/);
   assert.match(versionSource, /APP_VERSION_LABEL/);
   assert.match(page, /Control Module <code>\{APP_VERSION_LABEL\}<\/code>/);

@@ -1,6 +1,6 @@
 {
   "name": "control-module",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "A private, local-only dashboard for starting and stopping development projects.",
   "private": true,
   "license": "MIT",

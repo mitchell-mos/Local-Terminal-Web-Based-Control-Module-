@@ -13,3 +13,5 @@ Do not place session tokens, saved commands, logs, usernames, filesystem paths, 
 ## Scope
 
 Control Module is a single-user local command runner. Public hosting, multi-user deployment, reverse proxies, tunnels, port forwarding, and commands obtained from untrusted sources are outside the supported security model.
+
+The complete trust boundaries and expected local capabilities are documented in [`support/docs/Security.md`](../support/docs/Security.md).

@@ -161,7 +161,8 @@ process_is_owned_dashboard() {
   [[ "$process_cwd" == "${PROJECT_DIR:A}" \
     || ( -n "$CONFIGURED_PROJECT_DIR" && "$process_cwd" == "${CONFIGURED_PROJECT_DIR:A}" ) ]] || return 1
   process_command="$(/bin/ps -ww -p "$process_id" -o command= 2>/dev/null || true)"
-  [[ "$process_command" == *"node_modules/vinext/dist/cli.js"* && "$process_command" == *" start "* ]]
+  [[ ( "$process_command" == *"node_modules/vinext/dist/cli.js"* && "$process_command" == *" start "* ) \
+    || "$process_command" == *"dist/standalone/server.js"* ]]
 }
 
 runner_listener_pid() {
@@ -406,12 +407,17 @@ run_pnpm() {
 cd "$PROJECT_DIR" || exit 1
 trap cleanup EXIT HUP INT TERM
 
+STANDALONE_ENTRY="$PROJECT_DIR/dist/standalone/server.js"
+BUILD_STAMP="$STANDALONE_ENTRY"
+[[ -f "$BUILD_STAMP" ]] || BUILD_STAMP="$PROJECT_DIR/dist/server/index.js"
 needs_setup=0
-[[ -d node_modules ]] || needs_setup=1
-[[ -f dist/server/index.js ]] || needs_setup=1
-if [[ -f dist/server/index.js ]]; then
-  for source_file in app/page.tsx app/globals.css app/layout.tsx proxy.ts next.config.ts lib/security-headers.ts package.json pnpm-lock.yaml pnpm-workspace.yaml vite.config.ts; do
-    [[ "$source_file" -nt dist/server/index.js ]] && needs_setup=1
+[[ -f "$BUILD_STAMP" ]] || needs_setup=1
+if [[ ! -f "$STANDALONE_ENTRY" && ! -d node_modules ]]; then
+  needs_setup=1
+fi
+if [[ -f "$BUILD_STAMP" ]]; then
+  for source_file in app/page.tsx app/control-components.tsx app/globals.css app/layout.tsx proxy.ts next.config.ts lib/security-headers.ts lib/version.ts package.json pnpm-lock.yaml pnpm-workspace.yaml vite.config.ts version.json; do
+    [[ "$source_file" -nt "$BUILD_STAMP" ]] && needs_setup=1
   done
 fi
 if [[ "$needs_setup" == "1" ]]; then
@@ -433,10 +439,17 @@ if [[ "$needs_setup" == "1" ]]; then
   }
 fi
 
+STANDALONE_ENTRY="$PROJECT_DIR/dist/standalone/server.js"
 VINEXT_CLI="$PROJECT_DIR/node_modules/vinext/dist/cli.js"
-if [[ ! -f "$VINEXT_CLI" ]]; then
+if [[ ! -f "$STANDALONE_ENTRY" && ! -f "$VINEXT_CLI" ]]; then
   show_error "The local dashboard runtime is incomplete. Run pnpm install --frozen-lockfile and pnpm run build."
   exit 1
+fi
+
+if [[ -f "$STANDALONE_ENTRY" \
+  && -n "$CONFIGURED_RUNTIME_DIR" \
+  && "${PROJECT_DIR:A}" == "${CONFIGURED_RUNTIME_DIR:A}" ]]; then
+  /bin/rm -rf "$PROJECT_DIR/node_modules" "$PROJECT_DIR/dist/client" "$PROJECT_DIR/dist/server"
 fi
 
 /bin/chmod 700 "$USER_CONFIG_DIR" "$USER_DATA_DIR" "$USER_DATA_DIR/logs" "$PROJECT_LOG_DIR" "$RUNTIME_DIR" "$BACKUP_DIR" 2>/dev/null || true
@@ -489,7 +502,11 @@ if ! runner_ready; then
 fi
 
 if ! dashboard_ready; then
-  "$NODE" "$VINEXT_CLI" start --hostname 127.0.0.1 --port "$WEB_PORT" >>"$WEB_LOG" 2>&1 &
+  if [[ -f "$STANDALONE_ENTRY" ]]; then
+    /usr/bin/env HOST=127.0.0.1 PORT="$WEB_PORT" "$NODE" "$STANDALONE_ENTRY" >>"$WEB_LOG" 2>&1 &
+  else
+    "$NODE" "$VINEXT_CLI" start --hostname 127.0.0.1 --port "$WEB_PORT" >>"$WEB_LOG" 2>&1 &
+  fi
   WEB_PID=$!
 fi
 

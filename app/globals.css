@@ -1771,6 +1771,8 @@ textarea:focus-visible {
 }
 
 .project-row {
+  content-visibility: auto;
+  contain-intrinsic-block-size: 220px;
   position: relative;
   display: grid;
   grid-template-columns: minmax(0, 1fr);
@@ -3503,6 +3505,25 @@ textarea:focus-visible {
   .toast,
   .toast-timer {
     animation: none;
+  }
+}
+
+@media (forced-colors: active) {
+  button,
+  a,
+  input,
+  select,
+  textarea,
+  .project-row,
+  .toast,
+  .project-status {
+    forced-color-adjust: auto;
+  }
+
+  .project-status.running::before,
+  .process-command-set,
+  .project-select-button.selected {
+    background: Highlight;
   }
 }
 

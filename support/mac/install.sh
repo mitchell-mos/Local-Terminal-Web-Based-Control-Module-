@@ -390,10 +390,20 @@ runtime_is_valid() {
   [[ "$("$runtime_dir/bin/node" --version 2>/dev/null || true)" == "v$NODE_VERSION" ]]
 }
 
+prune_runtime() {
+  local runtime_dir="$1"
+  /bin/rm -rf \
+    "$runtime_dir/include" \
+    "$runtime_dir/share" \
+    "$runtime_dir/CHANGELOG.md" \
+    "$runtime_dir/README.md"
+}
+
 ensure_runtime() {
   local archive_path extracted_runtime previous_runtime actual_checksum
 
   if runtime_is_valid "$RUNTIME_CACHE"; then
+    prune_runtime "$RUNTIME_CACHE"
     return 0
   fi
 
@@ -420,6 +430,7 @@ ensure_runtime() {
     print -u2 -- "The downloaded Node.js runtime is incomplete or is not ARM64. Nothing was installed."
     return 1
   fi
+  prune_runtime "$extracted_runtime"
 
   previous_runtime="$RUNTIME_DOWNLOAD_DIR/previous-runtime"
   if [[ -e "$RUNTIME_CACHE" ]]; then
@@ -478,11 +489,9 @@ prepare_private_workspace() {
     /usr/bin/ditto "$SOURCE_DIR/$source_item" "$WORKSPACE_STAGING_DIR/$source_item"
   done
 
-  # Reuse an already prepared local runtime when available. Fresh downloads
-  # stay small and install these public packages on their first launch.
-  if [[ -d "$SOURCE_DIR/node_modules" && -f "$SOURCE_DIR/dist/server/index.js" ]]; then
-    /usr/bin/ditto "$SOURCE_DIR/node_modules" "$WORKSPACE_STAGING_DIR/node_modules"
-    /usr/bin/ditto "$SOURCE_DIR/dist" "$WORKSPACE_STAGING_DIR/dist"
+  # Standalone output contains only the packages required to serve the built dashboard.
+  if [[ -f "$SOURCE_DIR/dist/standalone/server.js" ]]; then
+    /usr/bin/ditto "$SOURCE_DIR/dist/standalone" "$WORKSPACE_STAGING_DIR/dist/standalone"
   fi
 
   print -r -- "$INSTANCE_ID" > "$WORKSPACE_STAGING_DIR/.instance-id"

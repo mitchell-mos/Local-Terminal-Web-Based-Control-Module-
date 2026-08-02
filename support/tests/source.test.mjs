@@ -107,6 +107,8 @@ test("does not ship private user data or unrelated runtime state", async () => {
   assert.match(proxy, /runtime", "session-token/);
   assert.match(proxy, /"X-Control-Token": token/);
   assert.match(proxy, /sec-fetch-site/);
+  assert.match(proxy, /MAX_REQUEST_BODY_BYTES/);
+  assert.match(proxy, /request\.body\.getReader\(\)/);
   assert.match(proxy, /Cross-site dashboard requests are not allowed/);
   assert.doesNotMatch(proxy, /instanceId|authorizationScheme/);
 });
@@ -215,7 +217,7 @@ test("binds the dashboard to loopback and documents dangerous capabilities", asy
 
 test("contains the public trust files and no stale starter directories", async () => {
   const files = await readdir(root);
-  for (const expected of ["LICENSE", "README.md", "Setup.app", "Uninstall.app", ".github", "support", "server", "lib"]) {
+  for (const expected of ["CHANGELOG.md", "LICENSE", "README.md", "Setup.app", "Uninstall.app", ".github", "support", "server", "lib"]) {
     assert.ok(files.includes(expected), `${expected} should exist`);
   }
   for (const removed of ["Control Module Setup.app", "Install Control Module.command", "Uninstall Control Module.command", "docs", "packaging", "scripts", "tests", "db", "drizzle", "worker", "build", "package-lock.json", "postcss.config.mjs"]) {
@@ -223,11 +225,52 @@ test("contains the public trust files and no stale starter directories", async (
   }
 
   const docs = await readdir(new URL("support/docs/", root));
-  for (const expected of ["Runtime.md", "Notices.md"]) {
+  for (const expected of ["Architecture.md", "Security.md", "Troubleshooting.md", "Runtime.md", "Notices.md"]) {
     assert.ok(docs.includes(expected), `support/docs/${expected} should exist`);
   }
   await assert.doesNotReject(access(new URL(".github/SECURITY.md", root)));
   await assert.doesNotReject(access(new URL(".github/CONTRIBUTING.md", root)));
+});
+
+test("ships keyboard-complete reusable controls", async () => {
+  const [components, page, styles] = await Promise.all([
+    read("app/control-components.tsx"),
+    read("app/page.tsx"),
+    read("app/globals.css"),
+  ]);
+
+  assert.match(components, /tabIndex=\{active === kind \? 0 : -1\}/);
+  assert.match(components, /ArrowRight/);
+  assert.match(components, /ArrowLeft/);
+  assert.match(components, /aria-atomic="true"/);
+  assert.doesNotMatch(components, /aria-live=/);
+  assert.match(page, /handleMenuKeyDown/);
+  assert.match(page, /role="tooltip"/);
+  assert.match(page, /aria-labelledby=\{`process-command-tab-/);
+  assert.doesNotMatch(page, /fetch\(baseUrl/);
+  assert.match(styles, /forced-colors: active/);
+  assert.match(styles, /content-visibility: auto/);
+});
+
+test("pins reproducible builds and emits a compact standalone runtime", async () => {
+  const [packageJson, nextConfig, launcher, installer, releaseBuilder] = await Promise.all([
+    read("package.json"),
+    read("next.config.ts"),
+    read("ControlModule"),
+    read("support/mac/install.sh"),
+    read("support/mac/release.sh"),
+  ]);
+  const parsed = JSON.parse(packageJson);
+
+  assert.match(parsed.packageManager, /^pnpm@11\.9\.0\+sha512\./);
+  assert.match(nextConfig, /output: "standalone"/);
+  assert.match(launcher, /dist\/standalone\/server\.js/);
+  assert.match(installer, /SOURCE_DIR\/dist\/standalone/);
+  assert.doesNotMatch(installer, /ditto "\$SOURCE_DIR\/node_modules"/);
+  assert.match(installer, /prune_runtime/);
+  assert.match(releaseBuilder, /git archive --format=tar HEAD/);
+  assert.match(releaseBuilder, /codesign --verify --deep --strict/);
+  assert.match(releaseBuilder, /shasum -a 256/);
 });
 
 test("keeps local documentation links routed to existing files", async () => {

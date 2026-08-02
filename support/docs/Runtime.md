@@ -12,4 +12,4 @@ The currently verified macOS Apple silicon bundle uses:
 
 The Control Module, Setup, and Uninstall app launchers are built as ARM64-only executables with native execution required. Intel Macs and Rosetta translation are intentionally unsupported.
 
-Setup downloads this archive directly from nodejs.org, checks the pinned SHA-256 value before extraction, and caches it only in Control Module’s private Application Support folder. The app bundle retains the complete runtime and the release's Node.js `LICENSE` file at `Contents/Resources/runtime/LICENSE-node.txt`. The runtime is not stored in this source repository.
+Setup downloads this archive directly from nodejs.org, checks the pinned SHA-256 value before extraction, and caches it only in Control Module’s private Application Support folder. It retains Node.js, npm, Corepack, and the release's `LICENSE`, but removes development headers, manuals, and release notes that Control Module never executes. The app stores the license at `Contents/Resources/runtime/LICENSE-node.txt`. The runtime is not stored in this source repository.

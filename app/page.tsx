@@ -4,10 +4,17 @@ import type { ChangeEvent, DragEvent as ReactDragEvent, FormEvent, KeyboardEvent
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import { APP_VERSION_LABEL } from "@/lib/version";
+import {
+  FilterSelect,
+  ProcessCommandTabs,
+  ToastRegion,
+  type ProcessCommandKind,
+  type Toast,
+  type ToastKind,
+} from "./control-components";
 
 type Host = "localhost" | "127.0.0.1";
 type Theme = "light" | "dark";
-type ToastKind = "success" | "error" | "info";
 type StatusFilter = "all" | "running" | "stopped";
 type SortBy = "manual" | "updated" | "name" | "port";
 type SortOrder = "ascending" | "descending";
@@ -15,7 +22,6 @@ type ProjectView = "list" | "cards";
 type ThemeEditorLevel = "basic" | "advanced";
 type ProjectFormMode = "basic" | "advanced";
 type BasicProjectKind = "auto" | "static" | "vite" | "next" | "package";
-type ProcessCommandKind = "setup" | "start" | "stop" | "restart";
 type ProjectInspectionState = "idle" | "checking" | "ready" | "error";
 
 type PortableProject = {
@@ -102,12 +108,29 @@ function reorderProjectList(
   return withoutSource;
 }
 
-type Toast = {
-  id: string;
-  kind: ToastKind;
-  title: string;
-  description: string;
-};
+function handleMenuKeyDown(
+  event: ReactKeyboardEvent<HTMLElement>,
+  closeMenu: () => void,
+) {
+  const items = Array.from(
+    event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="menuitem"]:not(:disabled)'),
+  );
+  if (items.length === 0) return;
+  const currentIndex = Math.max(0, items.indexOf(document.activeElement as HTMLButtonElement));
+  let nextIndex = currentIndex;
+  if (event.key === "ArrowDown") nextIndex = (currentIndex + 1) % items.length;
+  else if (event.key === "ArrowUp") nextIndex = (currentIndex - 1 + items.length) % items.length;
+  else if (event.key === "Home") nextIndex = 0;
+  else if (event.key === "End") nextIndex = items.length - 1;
+  else if (event.key === "Escape") {
+    event.preventDefault();
+    event.stopPropagation();
+    closeMenu();
+    return;
+  } else return;
+  event.preventDefault();
+  items[nextIndex]?.focus();
+}
 
 type ApiError = {
   error?: string;
@@ -200,19 +223,6 @@ type ThemePreset = {
   name: string;
   mode: Theme;
   colors: ThemeColors;
-};
-
-type FilterSelectOption<T extends string> = {
-  value: T;
-  label: string;
-};
-
-type FilterSelectProps<T extends string> = {
-  id: string;
-  label: string;
-  value: T;
-  options: FilterSelectOption<T>[];
-  onChange: (value: T) => void;
 };
 
 const LEGACY_STORAGE_KEY = "control-module-projects-v1";
@@ -913,120 +923,6 @@ async function apiRequest<T>(path: string, options?: RequestInit): Promise<T> {
   return data;
 }
 
-function FilterSelect<T extends string,>({
-  id,
-  label,
-  value,
-  options,
-  onChange,
-}: FilterSelectProps<T>) {
-  const [open, setOpen] = useState(false);
-  const rootRef = useRef<HTMLDivElement>(null);
-  const triggerRef = useRef<HTMLButtonElement>(null);
-  const optionRefs = useRef<Array<HTMLButtonElement | null>>([]);
-  const selectedIndex = Math.max(0, options.findIndex((option) => option.value === value));
-  const selectedOption = options[selectedIndex];
-  const labelId = `${id}-label`;
-  const listboxId = `${id}-options`;
-
-  useEffect(() => {
-    if (!open) return;
-    function closeOutside(event: PointerEvent) {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
-    }
-    document.addEventListener("pointerdown", closeOutside);
-    return () => document.removeEventListener("pointerdown", closeOutside);
-  }, [open]);
-
-  function focusOption(index: number) {
-    window.requestAnimationFrame(() => optionRefs.current[index]?.focus());
-  }
-
-  function openFromKeyboard(index: number) {
-    setOpen(true);
-    focusOption(index);
-  }
-
-  function handleTriggerKeyDown(event: ReactKeyboardEvent<HTMLButtonElement>) {
-    if (event.key === "ArrowDown") {
-      event.preventDefault();
-      openFromKeyboard(selectedIndex);
-    } else if (event.key === "ArrowUp") {
-      event.preventDefault();
-      openFromKeyboard(selectedIndex);
-    }
-  }
-
-  function handleOptionKeyDown(
-    event: ReactKeyboardEvent<HTMLButtonElement>,
-    index: number,
-  ) {
-    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
-      event.preventDefault();
-      const offset = event.key === "ArrowDown" ? 1 : -1;
-      focusOption((index + offset + options.length) % options.length);
-    } else if (event.key === "Home" || event.key === "End") {
-      event.preventDefault();
-      focusOption(event.key === "Home" ? 0 : options.length - 1);
-    } else if (event.key === "Escape") {
-      event.preventDefault();
-      event.stopPropagation();
-      setOpen(false);
-      triggerRef.current?.focus();
-    }
-  }
-
-  function chooseOption(option: FilterSelectOption<T>) {
-    onChange(option.value);
-    setOpen(false);
-    triggerRef.current?.focus();
-  }
-
-  return (
-    <div className="field compact-field filter-select" ref={rootRef}>
-      <span className="filter-select-label" id={labelId}>{label}</span>
-      <button
-        className={`filter-select-trigger ${open ? "open" : ""}`}
-        id={id}
-        ref={triggerRef}
-        type="button"
-        aria-haspopup="listbox"
-        aria-expanded={open}
-        aria-controls={listboxId}
-        aria-labelledby={`${labelId} ${id}-value`}
-        onClick={() => setOpen((current) => !current)}
-        onKeyDown={handleTriggerKeyDown}
-      >
-        <span id={`${id}-value`}>{selectedOption.label}</span>
-        <span className="filter-select-chevron" aria-hidden="true" />
-      </button>
-      {open && (
-        <div className="filter-select-menu" id={listboxId} role="listbox" aria-labelledby={labelId}>
-          {options.map((option, index) => {
-            const selected = option.value === value;
-            return (
-              <button
-                className={`filter-select-option ${selected ? "selected" : ""}`}
-                key={option.value}
-                ref={(element) => { optionRefs.current[index] = element; }}
-                type="button"
-                role="option"
-                aria-selected={selected}
-                tabIndex={selected ? 0 : -1}
-                onClick={() => chooseOption(option)}
-                onKeyDown={(event) => handleOptionKeyDown(event, index)}
-              >
-                <span>{option.label}</span>
-                {selected && <span className="filter-select-check" aria-hidden="true">✓</span>}
-              </button>
-            );
-          })}
-        </div>
-      )}
-    </div>
-  );
-}
-
 export default function Home() {
   const [name, setName] = useState("");
   const [port, setPort] = useState("");
@@ -1658,6 +1554,9 @@ export default function Home() {
 
   useEffect(() => {
     if (!transferMenuOpen) return;
+    window.requestAnimationFrame(() => {
+      transferMenuRef.current?.querySelector<HTMLButtonElement>('[role="menuitem"]:not(:disabled)')?.focus();
+    });
     function closeTransferOutside(event: PointerEvent) {
       if (!transferMenuRef.current?.contains(event.target as Node)) setTransferMenuOpen(false);
     }
@@ -1667,6 +1566,11 @@ export default function Home() {
 
   useEffect(() => {
     if (!projectInfoId) return;
+    window.requestAnimationFrame(() => {
+      document.getElementById(`project-menu-${projectInfoId}`)
+        ?.querySelector<HTMLButtonElement>('[role="menuitem"]:not(:disabled)')
+        ?.focus();
+    });
     function closeProjectInfoOutside(event: PointerEvent) {
       const target = event.target;
       if (target instanceof Element && target.closest("[data-project-info]")) return;
@@ -2478,13 +2382,6 @@ export default function Home() {
   }
 
   async function refreshProjectAfterRestart(project: Project) {
-    const baseUrl = getUrl(PRIMARY_HOST, project.port);
-    try {
-      await fetch(baseUrl, { cache: "reload", mode: "no-cors" });
-    } catch {
-      // The host restart still succeeded; opening it remains available below.
-    }
-
     let nativeResult: BrowserTabResult | null = null;
     try {
       nativeResult = await apiRequest<BrowserTabResult>("/api/projects/browser-tabs", {
@@ -3445,25 +3342,17 @@ export default function Home() {
                 </div>
               )}
             </div>
-            <div className="process-command-tabs" role="tablist" aria-label="Process command">
-              {(Object.keys(processCommands) as ProcessCommandKind[]).map((kind) => (
-                <button
-                  key={kind}
-                  className={activeProcessCommand === kind ? "active" : ""}
-                  type="button"
-                  role="tab"
-                  aria-selected={activeProcessCommand === kind}
-                  aria-controls="process-command-panel"
-                  onClick={() => setActiveProcessCommand(kind)}
-                >
-                  {processCommands[kind].label}
-                  {processCommands[kind].value.trim() && (
-                    <span className="process-command-set" aria-label="configured" />
-                  )}
-                </button>
-              ))}
-            </div>
-            <div className="process-command-panel" id="process-command-panel" role="tabpanel">
+            <ProcessCommandTabs
+              active={activeProcessCommand}
+              commands={processCommands}
+              onChange={setActiveProcessCommand}
+            />
+            <div
+              className="process-command-panel"
+              id="process-command-panel"
+              role="tabpanel"
+              aria-labelledby={`process-command-tab-${activeProcessCommand}`}
+            >
               <div className="process-command-label">
                 <label htmlFor={`${editingId ? "edit" : "add"}-${activeProcessCommand}-command`}>
                   {activeCommand.label} command
@@ -3584,35 +3473,7 @@ export default function Home() {
 
   return (
     <main className="app-shell">
-      {toasts.length > 0 && (
-        <div
-          className="toast-region"
-          aria-label="Notifications"
-          aria-live="polite"
-          aria-relevant="additions removals"
-        >
-          {toasts.map((toast) => (
-            <section
-              className={`toast toast-${toast.kind}`}
-              key={toast.id}
-              role={toast.kind === "error" ? "alert" : "status"}
-            >
-              <span className="toast-icon" aria-hidden="true">
-                {toast.kind === "success" ? "✓" : toast.kind === "error" ? "!" : "i"}
-              </span>
-              <div className="toast-copy">
-                <strong>{toast.title}</strong>
-                <p>{toast.description}</p>
-              </div>
-              {toast.kind === "error" ? (
-                <button type="button" onClick={() => dismissToast(toast.id)} aria-label="Dismiss notification">×</button>
-              ) : (
-                <span className="toast-timer" aria-hidden="true" />
-              )}
-            </section>
-          ))}
-        </div>
-      )}
+      <ToastRegion toasts={toasts} onDismiss={dismissToast} />
 
       <header className="app-header">
         <h1>Control Module</h1>
@@ -3711,13 +3572,23 @@ export default function Home() {
               }}
               aria-expanded={transferMenuOpen}
               aria-haspopup="menu"
+              aria-controls="app-actions-menu"
               aria-label="More app actions"
             >
               <span className="action-icon ellipsis-vertical-icon" aria-hidden="true" />
               More
             </button>
             {transferMenuOpen && (
-              <div className="transfer-popover" role="menu" aria-label="App options">
+              <div
+                className="transfer-popover"
+                id="app-actions-menu"
+                role="menu"
+                aria-label="App options"
+                onKeyDown={(event) => handleMenuKeyDown(event, () => {
+                  setTransferMenuOpen(false);
+                  transferMenuRef.current?.querySelector<HTMLButtonElement>(".transfer-button")?.focus();
+                })}
+              >
                 <button
                   type="button"
                   role="menuitem"
@@ -4074,13 +3945,20 @@ export default function Home() {
                               id={`project-menu-${project.id}`}
                               role="menu"
                               aria-label={`${project.name} options`}
+                              onKeyDown={(event) => handleMenuKeyDown(event, () => {
+                                setProjectInfoId(null);
+                                event.currentTarget
+                                  .closest("[data-project-info]")
+                                  ?.querySelector<HTMLButtonElement>(".project-info-button")
+                                  ?.focus();
+                              })}
                             >
                               <div className="project-menu-submenu">
                                 <button
                                   className="project-menu-item"
                                   type="button"
                                   role="menuitem"
-                                  aria-haspopup="dialog"
+                                  aria-describedby={`project-added-${project.id}`}
                                 >
                                   <span className="action-icon calendar-clock-icon" aria-hidden="true" />
                                   Date added
@@ -4088,8 +3966,8 @@ export default function Home() {
                                 </button>
                                 <div
                                   className="project-date-popover"
-                                  role="dialog"
-                                  aria-label={`${project.name} added date`}
+                                  id={`project-added-${project.id}`}
+                                  role="tooltip"
                                 >
                                   <strong>Added</strong>
                                   <dl>

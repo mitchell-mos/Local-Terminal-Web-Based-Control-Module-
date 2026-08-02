@@ -53,6 +53,8 @@ LOG_BACKUP_COUNT = 3
 REQUEST_TIMEOUT_SECONDS = 10.0
 MAX_REQUEST_THREADS = 24
 MAX_REQUEST_BODY_BYTES = 16 * 1024
+MAX_PROJECTS_FILE_BYTES = 2 * 1024 * 1024
+MAX_SAVED_PROJECTS = 100
 MAX_PROJECT_PATH_LENGTH = 4096
 MAX_PACKAGE_JSON_BYTES = 1024 * 1024
 MAX_PROJECT_COMMAND_LENGTH = 4096
@@ -729,11 +731,39 @@ def read_projects() -> list[dict[str, Any]]:
             return projects
         try:
             PROJECTS_FILE.chmod(0o600)
-            data = json.loads(PROJECTS_FILE.read_text(encoding="utf-8"))
+            raw_data = PROJECTS_FILE.read_bytes()
+            if len(raw_data) > MAX_PROJECTS_FILE_BYTES:
+                raise ValueError("The saved project file is too large.")
+            data = json.loads(raw_data)
             if not isinstance(data, list):
-                raise json.JSONDecodeError("Project data must be a list", "", 0)
-            return data
-        except (OSError, json.JSONDecodeError) as error:
+                raise ValueError("Saved projects must be a list.")
+            if len(data) > MAX_SAVED_PROJECTS:
+                raise ValueError(f"Save no more than {MAX_SAVED_PROJECTS} projects.")
+
+            projects: list[dict[str, Any]] = []
+            seen_ids: set[str] = set()
+            seen_ports: set[int] = set()
+            for index, project in enumerate(data, start=1):
+                if not isinstance(project, dict):
+                    raise ValueError(f"Saved project {index} must be an object.")
+                validated = validate_project(project)
+                created_at = project.get("createdAt")
+                updated_at = project.get("updatedAt")
+                if type(created_at) is not int or created_at < 0:
+                    raise ValueError(f"Saved project {index} has an invalid creation date.")
+                if type(updated_at) is not int or updated_at < created_at:
+                    raise ValueError(f"Saved project {index} has an invalid update date.")
+                project_id = str(validated["id"])
+                port = int(validated["port"])
+                if project_id in seen_ids:
+                    raise ValueError(f"Saved project {index} duplicates project ID {project_id}.")
+                if port in seen_ports:
+                    raise ValueError(f"Saved project {index} duplicates port {port}.")
+                seen_ids.add(project_id)
+                seen_ports.add(port)
+                projects.append({**validated, "createdAt": created_at, "updatedAt": updated_at})
+            return projects
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
             backup = preserve_corrupt_projects()
             backup_note = f" A private backup was saved as {backup.name}." if backup else ""
             raise ProjectDataError(
@@ -873,9 +903,17 @@ def wait_for_port_to_close(host: str, port: int, timeout: float = 2.0) -> bool:
 
 def listener_process_groups(port: int) -> set[int]:
     """Return process groups for listeners without ever signaling those listeners directly."""
+    return listener_process_groups_by_port({port}).get(port, set())
+
+
+def listener_process_groups_by_port(ports: set[int]) -> dict[int, set[int]]:
+    """Read all requested listener owners from one lsof snapshot."""
+    targets = {port for port in ports if MIN_PROJECT_PORT <= port <= MAX_PROJECT_PORT}
+    if not targets:
+        return {}
     try:
         result = subprocess.run(
-            ["/usr/sbin/lsof", "-nP", "-t", f"-iTCP:{port}", "-sTCP:LISTEN"],
+            ["/usr/sbin/lsof", "-nP", "-Fpn", "-iTCP", "-sTCP:LISTEN"],
             check=False,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
@@ -883,16 +921,25 @@ def listener_process_groups(port: int) -> set[int]:
             timeout=1,
         )
     except (OSError, subprocess.TimeoutExpired):
-        return set()
-    groups: set[int] = set()
+        return {}
+    groups_by_port: dict[int, set[int]] = {}
+    process_group: int | None = None
     for line in result.stdout.splitlines():
-        if not line.isdigit():
+        if line.startswith("p") and line[1:].isdigit():
+            try:
+                process_group = os.getpgid(int(line[1:]))
+            except (OSError, ProcessLookupError):
+                process_group = None
             continue
-        try:
-            groups.add(os.getpgid(int(line)))
-        except (OSError, ProcessLookupError):
+        if not line.startswith("n") or process_group is None:
             continue
-    return groups
+        match = re.search(r":(\d+)$", line[1:].split("->", 1)[0])
+        if not match:
+            continue
+        port = int(match.group(1))
+        if port in targets:
+            groups_by_port.setdefault(port, set()).add(process_group)
+    return groups_by_port
 
 
 def port_is_owned_by_process_group(port: int, process_group_id: int) -> bool:
@@ -1080,7 +1127,20 @@ def last_log_line(project_id: str) -> str:
         return ""
     try:
         lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-        return lines[-1][-320:] if lines else ""
+        if not lines:
+            return ""
+        summary = lines[-1][-320:]
+        summary = re.sub(
+            r"(?i)\bAuthorization\s*([:=])\s*(?:Bearer\s+)?\S+",
+            r"Authorization\1[redacted]",
+            summary,
+        )
+        summary = re.sub(
+            r"(?i)\b(api[_-]?key|password|secret|token)\s*([:=])\s*\S+",
+            r"\1\2[redacted]",
+            summary,
+        )
+        return re.sub(r"(?i)\bBearer\s+\S+", "Bearer [redacted]", summary)
     except OSError:
         return ""
 
@@ -1134,15 +1194,21 @@ def run_project_hook(
         )
 
 
-def project_view(project: dict[str, Any]) -> dict[str, Any]:
+def project_view(
+    project: dict[str, Any],
+    listener_groups: dict[int, set[int]] | None = None,
+) -> dict[str, Any]:
     project_id = project["id"]
     process_alive = process_is_running(project_id)
     process = PROCESSES.get(project_id)
+    port = int(project["port"])
+    if listener_groups is None:
+        listener_groups = listener_process_groups_by_port({port})
     running = bool(
         process_alive
         and process
-        and port_is_open(str(project["host"]), int(project["port"]))
-        and port_is_owned_by_process_group(int(project["port"]), process.pid)
+        and port_is_open(str(project["host"]), port)
+        and process.pid in listener_groups.get(port, set())
     )
     if running:
         HEALTHY_PROJECTS.add(project_id)
@@ -1164,6 +1230,12 @@ def project_view(project: dict[str, Any]) -> dict[str, Any]:
             else {}
         ),
     }
+
+
+def project_views(projects: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    ports = {int(project["port"]) for project in projects}
+    listener_groups = listener_process_groups_by_port(ports)
+    return [project_view(project, listener_groups) for project in projects]
 
 
 def process_group_is_running(process_group_id: int) -> bool:
@@ -1366,7 +1438,7 @@ class ControlHandler(BaseHTTPRequestHandler):
                 return
             try:
                 with LOCK:
-                    self.send_json(200, {"projects": [project_view(item) for item in read_projects()]})
+                    self.send_json(200, {"projects": project_views(read_projects())})
             except ProjectDataError as error:
                 self.send_json(500, {"error": str(error)})
             return
@@ -1712,7 +1784,7 @@ class ControlHandler(BaseHTTPRequestHandler):
                 hook_errors.append(f"{project.get('name', project_id)}: {error}")
         with LOCK:
             stopped_ids, forced_ids, errors = stop_processes(managed_ids)
-            projects = [project_view(project) for project in read_projects()]
+            projects = project_views(read_projects())
         self.send_json(
             200,
             {

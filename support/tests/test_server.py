@@ -187,6 +187,75 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(backups[0].read_text(encoding="utf-8"), "not-json")
         self.assertEqual(private_mode(backups[0]), 0o600)
 
+    def test_saved_projects_are_schema_checked(self) -> None:
+        project = {
+            "id": "saved-project",
+            "name": "Saved project",
+            "host": "127.0.0.1",
+            "port": 4321,
+            "command": "python3 -m http.server 4321",
+            "createdAt": 1,
+            "updatedAt": 1,
+        }
+        control_server.write_projects([project])
+        saved = control_server.read_projects()
+        self.assertEqual(saved[0]["id"], "saved-project")
+        self.assertEqual(saved[0]["publicUrl"], "")
+
+        control_server.write_projects([project, {**project, "name": "Duplicate"}])
+        with self.assertRaisesRegex(control_server.ProjectDataError, "left unchanged"):
+            control_server.read_projects()
+
+    def test_listener_ownership_uses_one_lsof_snapshot(self) -> None:
+        completed = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout="p111\nn127.0.0.1:4321\np222\nn*:4322\n",
+            stderr="",
+        )
+        with (
+            mock.patch.object(control_server.subprocess, "run", return_value=completed) as run,
+            mock.patch.object(control_server.os, "getpgid", side_effect=lambda pid: pid + 1000),
+        ):
+            owners = control_server.listener_process_groups_by_port({4321, 4322})
+
+        self.assertEqual(owners, {4321: {1111}, 4322: {1222}})
+        run.assert_called_once()
+
+    def test_project_views_share_listener_ownership_snapshot(self) -> None:
+        projects = [
+            {"id": "one", "name": "One", "host": "127.0.0.1", "port": 4321},
+            {"id": "two", "name": "Two", "host": "127.0.0.1", "port": 4322},
+        ]
+        control_server.PROCESSES.update({
+            "one": mock.Mock(pid=111),
+            "two": mock.Mock(pid=222),
+        })
+        with (
+            mock.patch.object(control_server, "process_is_running", return_value=True),
+            mock.patch.object(control_server, "port_is_open", return_value=True),
+            mock.patch.object(
+                control_server,
+                "listener_process_groups_by_port",
+                return_value={4321: {111}, 4322: {222}},
+            ) as listener_snapshot,
+        ):
+            views = control_server.project_views(projects)
+
+        self.assertTrue(all(project["running"] for project in views))
+        listener_snapshot.assert_called_once_with({4321, 4322})
+
+    def test_log_summary_redacts_common_secrets(self) -> None:
+        control_server.ensure_private_directory(control_server.LOG_DIR)
+        control_server.log_path("private-output").write_text(
+            "TOKEN=hidden-value Authorization: Bearer another-secret\n",
+            encoding="utf-8",
+        )
+        summary = control_server.last_log_line("private-output")
+        self.assertNotIn("hidden-value", summary)
+        self.assertNotIn("another-secret", summary)
+        self.assertIn("[redacted]", summary)
+
     def test_session_token_is_private_and_stable(self) -> None:
         first = control_server.ensure_session_token()
         second = control_server.ensure_session_token()

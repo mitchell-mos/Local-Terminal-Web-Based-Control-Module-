@@ -165,7 +165,9 @@ test("publishes a consistent user-facing release version", async () => {
   assert.match(page, /Control Module <code>\{APP_VERSION_LABEL\}<\/code>/);
   assert.match(page, /Report a bug/);
   assert.match(readme, /vMAJOR\.UPDATE\.FIX/);
-  assert.match(versionWorkflow, /on:\s*\n\s*push:/);
+  assert.match(versionWorkflow, /on:\s*\n\s*pull_request:/);
+  assert.doesNotMatch(versionWorkflow, /on:\s*\n\s*push:/);
+  assert.match(versionWorkflow, /pull_request\.user\.login == 'dependabot\[bot\]'/);
   assert.match(versionWorkflow, /support\/version\.mjs check/);
 });
 

@@ -117,7 +117,7 @@ function handleMenuKeyDown(
   );
   if (items.length === 0) return;
   const currentIndex = Math.max(0, items.indexOf(document.activeElement as HTMLButtonElement));
-  let nextIndex = currentIndex;
+  let nextIndex: number;
   if (event.key === "ArrowDown") nextIndex = (currentIndex + 1) % items.length;
   else if (event.key === "ArrowUp") nextIndex = (currentIndex - 1 + items.length) % items.length;
   else if (event.key === "Home") nextIndex = 0;
@@ -2676,14 +2676,12 @@ export default function Home() {
     );
     if (rows.length === 0) return;
 
-    let targetRow = rows[rows.length - 1];
-    if (projectView === "list") {
-      targetRow = rows.find((row) => {
+    const targetRow = projectView === "list"
+      ? rows.find((row) => {
         const bounds = row.getBoundingClientRect();
         return event.clientY < bounds.top + (bounds.height / 2);
-      }) || rows[rows.length - 1];
-    } else {
-      targetRow = rows.reduce((closest, row) => {
+      }) || rows[rows.length - 1]
+      : rows.reduce((closest, row) => {
         const closestBounds = closest.getBoundingClientRect();
         const rowBounds = row.getBoundingClientRect();
         const closestX = Math.max(closestBounds.left, Math.min(event.clientX, closestBounds.right));
@@ -2694,7 +2692,6 @@ export default function Home() {
         const rowDistance = Math.hypot(event.clientX - rowX, event.clientY - rowY);
         return rowDistance < closestDistance ? row : closest;
       });
-    }
 
     const targetId = targetRow.dataset.projectId;
     if (!targetId) return;

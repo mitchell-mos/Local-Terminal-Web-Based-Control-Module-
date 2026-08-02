@@ -140,7 +140,7 @@ export function ProcessCommandTabs({ active, commands, onChange }: ProcessComman
   const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
 
   function chooseFromKeyboard(event: KeyboardEvent<HTMLButtonElement>, index: number) {
-    let nextIndex = index;
+    let nextIndex: number;
     if (event.key === "ArrowRight" || event.key === "ArrowDown") nextIndex = (index + 1) % kinds.length;
     else if (event.key === "ArrowLeft" || event.key === "ArrowUp") nextIndex = (index - 1 + kinds.length) % kinds.length;
     else if (event.key === "Home") nextIndex = 0;

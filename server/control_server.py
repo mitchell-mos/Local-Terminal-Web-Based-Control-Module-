@@ -1157,34 +1157,34 @@ def run_project_hook(
         return
 
     project_id = str(project["id"])
-    log_file = open_private_log(project_id)
-    log_file.write(
-        f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] {label} command started.\n".encode()
-    )
-    log_file.flush()
-    process = subprocess.Popen(
-        ["/bin/zsh", "-c", command],
-        cwd=PROJECT_DIR,
-        env=project_environment(),
-        stdout=log_file,
-        stderr=subprocess.STDOUT,
-        start_new_session=True,
-    )
-    try:
-        return_code = process.wait(timeout=timeout)
-    except subprocess.TimeoutExpired as error:
+    with open_private_log(project_id) as log_file:
+        log_file.write(
+            f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] {label} command started.\n".encode()
+        )
+        log_file.flush()
+        process = subprocess.Popen(
+            ["/bin/zsh", "-c", command],
+            cwd=PROJECT_DIR,
+            env=project_environment(),
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
         try:
-            os.killpg(process.pid, signal.SIGTERM)
-            process.wait(timeout=2)
-        except (ProcessLookupError, subprocess.TimeoutExpired):
+            return_code = process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired as error:
             try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            process.wait(timeout=2)
-        raise ValueError(f"The {label.lower()} command timed out after {int(timeout)} seconds.") from error
-    finally:
-        log_file.close()
+                os.killpg(process.pid, signal.SIGTERM)
+                process.wait(timeout=2)
+            except (ProcessLookupError, subprocess.TimeoutExpired):
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.wait(timeout=2)
+            raise ValueError(
+                f"The {label.lower()} command timed out after {int(timeout)} seconds."
+            ) from error
 
     if return_code != 0:
         detail = last_log_line(project_id)

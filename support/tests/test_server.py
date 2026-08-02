@@ -519,6 +519,7 @@ class ControlServerTests(unittest.TestCase):
                 "publicUrl": "https://user:secret@example.com/project",
             })
 
+    @unittest.skipUnless(Path("/bin/zsh").is_file(), "project hooks require macOS zsh")
     def test_optional_project_hook_is_logged_and_checked(self) -> None:
         project = {
             "id": "hook-project",
@@ -531,6 +532,25 @@ class ControlServerTests(unittest.TestCase):
         project["setupCommand"] = "exit 7"
         with self.assertRaisesRegex(ValueError, "status 7"):
             control_server.run_project_hook(project, "setupCommand", "Setup", timeout=2)
+
+    def test_project_hook_closes_log_when_process_cannot_launch(self) -> None:
+        log_context = mock.MagicMock()
+        log_file = mock.MagicMock()
+        log_context.__enter__.return_value = log_file
+        project = {"id": "failed-hook", "setupCommand": "exit 0"}
+
+        with (
+            mock.patch.object(control_server, "open_private_log", return_value=log_context),
+            mock.patch.object(
+                control_server.subprocess,
+                "Popen",
+                side_effect=FileNotFoundError("shell not found"),
+            ),
+            self.assertRaisesRegex(FileNotFoundError, "shell not found"),
+        ):
+            control_server.run_project_hook(project, "setupCommand", "Setup", timeout=2)
+
+        log_context.__exit__.assert_called_once()
 
     def test_project_inspection_rejects_relative_or_missing_paths(self) -> None:
         with self.assertRaisesRegex(ValueError, "full project folder path"):
@@ -719,9 +739,16 @@ class ControlServerTests(unittest.TestCase):
         )
         control_server.PROCESSES["owned-test"] = process
         deadline = time.monotonic() + 5
-        while time.monotonic() < deadline and not control_server.port_is_open("127.0.0.1", port):
+        owned_listener_ready = False
+        while time.monotonic() < deadline:
+            if (
+                control_server.port_is_open("127.0.0.1", port)
+                and control_server.port_is_owned_by_process_group(port, process.pid)
+            ):
+                owned_listener_ready = True
+                break
             time.sleep(0.05)
-        self.assertTrue(control_server.port_is_owned_by_process_group(port, process.pid))
+        self.assertTrue(owned_listener_ready)
         self.assertTrue(control_server.stop_process("owned-test"))
         self.assertTrue(control_server.wait_for_port_to_close("127.0.0.1", port, timeout=3))
 

@@ -1180,6 +1180,7 @@ def run_project_hook(
                 try:
                     os.killpg(process.pid, signal.SIGKILL)
                 except ProcessLookupError:
+                    # The process group may exit between the timeout and forced-stop attempt.
                     pass
                 process.wait(timeout=2)
             raise ValueError(

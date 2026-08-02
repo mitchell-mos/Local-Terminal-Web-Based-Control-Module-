@@ -1,6 +1,6 @@
 {
   "name": "control-module",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "A private, local-only dashboard for starting and stopping development projects.",
   "private": true,
   "license": "MIT",
@@ -16,7 +16,7 @@
     "version:check": "node support/version.mjs check",
     "typecheck": "tsc --noEmit --incremental false",
     "lint": "oxlint --deny-warnings app lib server support/version.mjs support/tests proxy.ts next.config.ts vite.config.ts",
-    "test:unit": "node --test support/tests/*.test.mjs",
+    "test:unit": "node --test support/tests/*.test.*",
     "test:python": "python3 -B -m unittest discover -s support/tests -p 'test_*.py'",
     "test": "pnpm run typecheck && pnpm run lint && pnpm run test:unit && pnpm run test:python"
   },

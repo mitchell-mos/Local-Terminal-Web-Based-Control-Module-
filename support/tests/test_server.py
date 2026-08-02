@@ -729,7 +729,9 @@ class ControlServerTests(unittest.TestCase):
                 probe.bind(("127.0.0.1", 0))
             except PermissionError:
                 self.skipTest("the current sandbox does not permit local listener tests")
-            port = probe.getsockname()[1]
+        port = control_server.find_available_port("127.0.0.1", 8999)
+        if port is None:
+            self.skipTest("no valid project port is available for the listener test")
         command = [sys.executable, "-m", "http.server", str(port), "--bind", "127.0.0.1"]
         process = subprocess.Popen(
             command,

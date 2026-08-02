@@ -95,6 +95,7 @@ test("does not ship private user data or unrelated runtime state", async () => {
   assert.doesNotMatch(page, />\s*Deny\s*</);
   assert.doesNotMatch(page, />\s*Accept\s*</);
   assert.match(restartIcon, /stroke-width="3"/);
+  assert.match(restartIcon, /transform="rotate\(90 12 12\)"/);
   assert.match(restartIcon, /M14 4h7v7z/);
   assert.match(runner, /\/api\/projects\/browser-tabs/);
   assert.match(runner, /project_browser_tabs/);

@@ -38,6 +38,7 @@ VERSION="v$(/usr/bin/plutil -extract major raw version.json).$(printf '%02d' "$(
 STAGING_DIR="$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/control-module-release.XXXXXX")"
 PACKAGE_DIR="$STAGING_DIR/Control Module $VERSION"
 ARCHIVE_PATH="$OUTPUT_DIR/Control-Module-$VERSION-macOS-arm64.zip"
+ARCHIVE_NAME="${ARCHIVE_PATH:t}"
 
 cleanup() {
   /bin/rm -rf "$STAGING_DIR"
@@ -47,11 +48,16 @@ trap cleanup EXIT HUP INT TERM
 /bin/mkdir -p "$PACKAGE_DIR" "$OUTPUT_DIR"
 /usr/bin/git archive --format=tar HEAD | /usr/bin/tar -xf - -C "$PACKAGE_DIR"
 /usr/bin/ditto "$REPOSITORY_DIR/dist/standalone" "$PACKAGE_DIR/dist/standalone"
+"$PACKAGE_DIR/support/mac/setup.sh" "$PACKAGE_DIR/Setup.app"
+"$PACKAGE_DIR/support/mac/remove.sh" "$PACKAGE_DIR/Uninstall.app"
 /usr/bin/xattr -cr "$PACKAGE_DIR"
 /usr/bin/codesign --verify --deep --strict "$PACKAGE_DIR/Setup.app"
 /usr/bin/codesign --verify --deep --strict "$PACKAGE_DIR/Uninstall.app"
 
 /bin/rm -f "$ARCHIVE_PATH" "$ARCHIVE_PATH.sha256"
 /usr/bin/ditto -c -k --sequesterRsrc --keepParent "$PACKAGE_DIR" "$ARCHIVE_PATH"
-/usr/bin/shasum -a 256 "$ARCHIVE_PATH" > "$ARCHIVE_PATH.sha256"
+(
+  cd "$OUTPUT_DIR"
+  /usr/bin/shasum -a 256 "$ARCHIVE_NAME" > "$ARCHIVE_NAME.sha256"
+)
 print -- "$ARCHIVE_PATH"

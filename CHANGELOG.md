@@ -6,6 +6,11 @@ Notable user-facing changes are recorded here. Versions use `vMAJOR.UPDATE.FIX`.
 
 - No unreleased changes.
 
+## v1.01.1
+
+- Fixed the release-version check so automated dependency maintenance can merge without publishing an unrelated app release.
+- Kept exact version-increment enforcement for regular release pull requests.
+
 ## v1.01.0
 
 - Added persistent project filtering, optional published-site links, clearer project reordering, and improved restart behavior.

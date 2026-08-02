@@ -1219,7 +1219,7 @@ export default function Home() {
         : "dark";
 
     let nextCustomThemes: CustomTheme[] = [];
-    let nextSelectedThemeIds = DEFAULT_SELECTED_THEMES;
+    let nextSelectedThemeIds: SelectedThemeIds;
     try {
       const storedCustomThemes = JSON.parse(
         window.localStorage.getItem(CUSTOM_THEMES_KEY) || "[]",

@@ -6,6 +6,10 @@ Notable user-facing changes are recorded here. Versions use `vMAJOR.UPDATE.FIX`.
 
 - No unreleased changes.
 
+## v1.03.2
+
+- Made Setup automatically re-check the current installation whenever its existing window is activated or reopened, while preserving unsaved form choices.
+
 ## v1.03.1
 
 - Fixed healthy dashboard detection for current and legacy asset layouts so reopening the app does not restart an existing instance.

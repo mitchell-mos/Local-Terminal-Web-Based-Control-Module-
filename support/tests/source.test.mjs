@@ -539,6 +539,8 @@ test("ships relocatable native setup and uninstall apps", async () => {
   assert.match(setupSource, /support\/mac\/store\.sh/);
   assert.match(setupSource, /support\/mac\/manage\.sh/);
   assert.match(setupSource, /Existing installation found/);
+  assert.match(setupSource, /applicationDidBecomeActive:[\s\S]*refreshStatusPreservingForm:YES/);
+  assert.match(setupSource, /applicationShouldHandleReopen:[\s\S]*refreshStatusPreservingForm:YES/);
   assert.match(setupSource, /Update & apply/);
   assert.match(setupSource, /Apply settings/);
   assert.match(setupSource, /Cancel operation/);

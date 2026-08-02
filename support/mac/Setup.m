@@ -111,6 +111,23 @@ static NSStackView *CMVerticalStack(NSArray<NSView *> *views, CGFloat spacing) {
     return YES;
 }
 
+- (void)applicationDidBecomeActive:(NSNotification *)notification {
+    (void)notification;
+    if (!self.window || self.sourceFolder.length == 0 || self.activeTask) return;
+    [self refreshStatusPreservingForm:YES];
+}
+
+- (BOOL)applicationShouldHandleReopen:(NSApplication *)sender hasVisibleWindows:(BOOL)hasVisibleWindows {
+    (void)sender;
+    if (!hasVisibleWindows && self.window) {
+        [self.window makeKeyAndOrderFront:nil];
+    }
+    if (self.sourceFolder.length > 0 && !self.activeTask) {
+        [self refreshStatusPreservingForm:YES];
+    }
+    return YES;
+}
+
 - (NSString *)locateSourceFolder:(NSError **)error {
     NSURL *appURL = NSBundle.mainBundle.bundleURL.URLByStandardizingPath;
     NSArray<NSURL *> *candidates = @[

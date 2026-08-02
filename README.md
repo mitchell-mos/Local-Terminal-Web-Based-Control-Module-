@@ -47,8 +47,8 @@ The native Setup and Uninstall apps are generated from reviewable Objective-C, A
 Each packaged release includes a SHA-256 checksum and GitHub build-provenance attestation. You can verify them before opening Setup:
 
 ```sh
-shasum -a 256 -c Control-Module-v1.03.0-macOS-arm64.zip.sha256
-gh attestation verify Control-Module-v1.03.0-macOS-arm64.zip --repo mitchell-mos/Local-Terminal-Web-Based-Control-Module-
+shasum -a 256 -c Control-Module-v1.03.1-macOS-arm64.zip.sha256
+gh attestation verify Control-Module-v1.03.1-macOS-arm64.zip --repo mitchell-mos/Local-Terminal-Web-Based-Control-Module-
 ```
 
 ## Projects

@@ -6,6 +6,12 @@ Notable user-facing changes are recorded here. Versions use `vMAJOR.UPDATE.FIX`.
 
 - No unreleased changes.
 
+## v1.03.1
+
+- Fixed healthy dashboard detection for current and legacy asset layouts so reopening the app does not restart an existing instance.
+- Made the app and Desktop shortcut focus an existing dashboard tab, including nested routes, or open a new tab when none exists.
+- Serialized concurrent launches so repeated app or Desktop-shortcut clicks reuse the same local services.
+
 ## v1.03.0
 
 - Replaced the sequential Setup dialogs with a larger native macOS interface that detects and explains existing installations.

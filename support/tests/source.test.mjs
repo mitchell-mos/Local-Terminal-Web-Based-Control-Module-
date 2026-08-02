@@ -118,6 +118,7 @@ test("matches local browser tabs by port while preserving nested routes", async 
   const context = { Date: { now: () => 123456 } };
   runInNewContext(source, context);
 
+  assert.equal(JSON.parse(context.run(["1025", "detect"])).available, true);
   assert.equal(context.isMatchingProjectUrl("http://localhost:4321/", 4321), true);
   assert.equal(context.isMatchingProjectUrl("http://127.0.0.1:4321/about/team#staff", 4321), true);
   assert.equal(context.isMatchingProjectUrl("https://localhost:4321/settings?tab=local", 4321), true);
@@ -127,6 +128,20 @@ test("matches local browser tabs by port while preserving nested routes", async 
     context.freshProjectUrl("http://127.0.0.1:4321/about?tab=team#staff"),
     "http://127.0.0.1:4321/about?tab=team&_control_reload=123456#staff",
   );
+});
+
+test("reuses a healthy dashboard instead of launching a duplicate", async () => {
+  const launcher = await read("ControlModule");
+  const assetPattern = launcher.match(/BOOTSTRAP_ASSET_PATTERN='([^']+)'/);
+
+  assert.ok(assetPattern, "the launcher must declare its dashboard asset pattern");
+  const assetMatcher = new RegExp(assetPattern[1]);
+  assert.equal(assetMatcher.test("/_next/static/chunks/index-DwlVrl8l.js"), true);
+  assert.equal(assetMatcher.test("/assets/index-CGqTNnpo.js"), true);
+  assert.doesNotMatch(launcher, /curl[^\n]*\|\s*\/usr\/bin\/grep -q/);
+  assert.match(launcher, /server\/browser_tabs\.jxa/);
+  assert.match(launcher, /"\$WEB_PORT" focus/);
+  assert.match(launcher, /shlock -f "\$LAUNCH_LOCK_FILE"/);
 });
 
 test("publishes a consistent user-facing release version", async () => {

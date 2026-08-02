@@ -94,7 +94,7 @@ function run(argumentsList) {
     permissionDenied: false,
     browsers: [],
   };
-  if (!Number.isInteger(port) || port < 1026 || port > 9999) {
+  if (!Number.isInteger(port) || port < 1025 || port > 65535) {
     result.available = false;
     return JSON.stringify(result);
   }

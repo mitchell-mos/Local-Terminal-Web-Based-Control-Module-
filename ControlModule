@@ -80,6 +80,10 @@ TOKEN_FILE="$RUNTIME_DIR/session-token"
 WEB_LOG="$USER_DATA_DIR/logs/dashboard.log"
 RUNNER_LOG="$USER_DATA_DIR/logs/runner.log"
 SERVER_FILE="$PROJECT_DIR/server/control_server.py"
+BROWSER_TAB_SCRIPT="$PROJECT_DIR/server/browser_tabs.jxa"
+BOOTSTRAP_ASSET_PATTERN='(/assets/index-[A-Za-z0-9_-]+\.js|/_next/static/chunks/index-[A-Za-z0-9_-]+\.js)'
+LAUNCH_LOCK_FILE="$USER_CONFIG_DIR/launcher.lock"
+LAUNCH_LOCK_ACQUIRED=0
 WEB_PID=""
 RUNNER_PID=""
 BUNDLED_NODE="$SELF_DIR/../Resources/runtime/bin/node"
@@ -132,16 +136,12 @@ session_token() {
   fi
 }
 
-web_ready() {
-  /usr/bin/curl -fsS "$WEB_URL" 2>/dev/null | /usr/bin/grep -q "Control Module"
-}
-
 web_assets_ready() {
   local page_html bootstrap_asset
   page_html="$(/usr/bin/curl -fsS "$WEB_URL" 2>/dev/null || true)"
-  print -r -- "$page_html" | /usr/bin/grep -q "Control Module" || return 1
+  [[ "$page_html" == *"Control Module"* ]] || return 1
   bootstrap_asset="$(print -r -- "$page_html" \
-    | /usr/bin/grep -oE '/assets/index-[A-Za-z0-9_-]+\.js' \
+    | /usr/bin/grep -oE "$BOOTSTRAP_ASSET_PATTERN" \
     | /usr/bin/head -1 || true)"
   [[ -n "$bootstrap_asset" ]] || return 1
   /usr/bin/curl -fsS -o /dev/null "${WEB_URL%/}${bootstrap_asset}" 2>/dev/null
@@ -209,10 +209,11 @@ stop_broken_owned_dashboard() {
 }
 
 runner_ready() {
-  local token
+  local token health_response
   token="$(session_token)"
   [[ -n "$token" ]] || return 1
-  /usr/bin/curl -fsS -H "X-Control-Token: $token" "$RUNNER_URL" 2>/dev/null | /usr/bin/grep -q '"ok": true'
+  health_response="$(/usr/bin/curl -fsS -H "X-Control-Token: $token" "$RUNNER_URL" 2>/dev/null || true)"
+  [[ "$health_response" == *'"ok": true'* || "$health_response" == *'"ok":true'* ]]
 }
 
 dashboard_ready() {
@@ -266,11 +267,17 @@ save_runner_port() {
 }
 
 open_control_module() {
-  local url="${WEB_URL}"
+  local url="${WEB_URL}" focus_result=""
   if [[ "${CONTROL_MODULE_NO_OPEN:-0}" == "1" ]]; then
     return 0
   fi
   if [[ "$(uname -s)" == "Darwin" ]]; then
+    if [[ -f "$BROWSER_TAB_SCRIPT" ]]; then
+      focus_result="$(/usr/bin/osascript -l JavaScript "$BROWSER_TAB_SCRIPT" "$WEB_PORT" focus 2>/dev/null || true)"
+      if print -r -- "$focus_result" | /usr/bin/grep -Eq '"focused"[[:space:]]*:[[:space:]]*1'; then
+        return 0
+      fi
+    fi
     /usr/bin/open "$url"
   elif command -v xdg-open >/dev/null 2>&1; then
     xdg-open "$url" >/dev/null 2>&1
@@ -279,7 +286,37 @@ open_control_module() {
   fi
 }
 
+release_launch_lock() {
+  if (( LAUNCH_LOCK_ACQUIRED )); then
+    /bin/rm -f "$LAUNCH_LOCK_FILE"
+    LAUNCH_LOCK_ACQUIRED=0
+  fi
+}
+
+acquire_launch_lock() {
+  /bin/mkdir -p "$USER_CONFIG_DIR" || return 1
+  /bin/chmod 700 "$USER_CONFIG_DIR" 2>/dev/null || true
+  if /usr/bin/shlock -f "$LAUNCH_LOCK_FILE" -p $$; then
+    LAUNCH_LOCK_ACQUIRED=1
+    return 0
+  fi
+  return 1
+}
+
+wait_for_running_instance() {
+  local attempt
+  for attempt in {1..120}; do
+    if dashboard_ready && runner_ready; then
+      open_control_module
+      return 0
+    fi
+    /bin/sleep 0.25
+  done
+  return 1
+}
+
 cleanup() {
+  release_launch_lock
   if [[ -n "$WEB_PID" ]]; then
     /bin/kill "$WEB_PID" >/dev/null 2>&1
   fi
@@ -352,6 +389,30 @@ if [[ ! -f "$SERVER_FILE" ]]; then
   exit 1
 fi
 
+trap cleanup EXIT HUP INT TERM
+
+# A healthy installation is the fastest and safest path: do not run setup,
+# rebuild, or process-start commands when the existing services can be reused.
+if dashboard_ready && runner_ready; then
+  open_control_module
+  exit 0
+fi
+
+if ! acquire_launch_lock; then
+  if wait_for_running_instance; then
+    exit 0
+  fi
+  show_error "Control Module is already starting, but its local services are not ready yet. Wait a moment, then reopen the app."
+  exit 1
+fi
+
+# Another launcher may have finished between the first readiness check and lock.
+if dashboard_ready && runner_ready; then
+  release_launch_lock
+  open_control_module
+  exit 0
+fi
+
 if ! prepare_private_data; then
   show_error "Existing private data could not be moved safely. Check access to the verified Control Module folder, then rerun setup. Nothing was overwritten."
   exit 1
@@ -405,7 +466,6 @@ run_pnpm() {
 }
 
 cd "$PROJECT_DIR" || exit 1
-trap cleanup EXIT HUP INT TERM
 
 STANDALONE_ENTRY="$PROJECT_DIR/dist/standalone/server.js"
 BUILD_STAMP="$STANDALONE_ENTRY"
@@ -478,6 +538,7 @@ if ! runner_ready && /usr/sbin/lsof -nP -iTCP:"$RUNNER_PORT" -sTCP:LISTEN >/dev/
 fi
 
 if dashboard_ready && runner_ready; then
+  release_launch_lock
   open_control_module
   exit 0
 fi
@@ -512,6 +573,7 @@ fi
 
 for attempt in {1..80}; do
   if dashboard_ready && runner_ready; then
+    release_launch_lock
     open_control_module
     if [[ -n "$WEB_PID" ]]; then
       wait "$WEB_PID"

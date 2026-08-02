@@ -126,7 +126,7 @@ PROCESS_STOP_REASONS: dict[str, str] = {}
 HEALTHY_PROJECTS: set[str] = set()
 LAST_ACTIONS: dict[str, float] = {}
 SESSION_TOKEN = ""
-PROJECT_DATA_BACKUP: Path | None = None
+PROJECT_DATA_STATE: dict[str, Path | None] = {"backup": None}
 NATIVE_APP_IDENTIFIERS = {
     "settings": "io.github.mitchell-mos.control-module.setup",
     "uninstall": "io.github.mitchell-mos.control-module.uninstall",
@@ -634,6 +634,7 @@ def ensure_private_directory(path: Path) -> None:
     try:
         path.chmod(0o700)
     except OSError:
+        # Permission hardening is best-effort on filesystems that do not expose POSIX modes.
         pass
 
 
@@ -652,6 +653,7 @@ def write_private_text(path: Path, content: str) -> None:
         try:
             temporary.unlink()
         except FileNotFoundError:
+            # os.replace() already moved the temporary file into place.
             pass
 
 
@@ -671,6 +673,7 @@ def ensure_session_token() -> str:
         try:
             SESSION_TOKEN_FILE.chmod(0o600)
         except OSError:
+            # The token remains usable on filesystems without POSIX permission support.
             pass
     SESSION_TOKEN = saved
     return saved
@@ -697,19 +700,19 @@ def secure_existing_runtime_files() -> None:
         try:
             path.chmod(0o600)
         except OSError:
+            # Continue when the underlying filesystem cannot tighten POSIX permissions.
             pass
 
 
 def write_projects(projects: list[dict[str, Any]]) -> None:
-    global PROJECT_DATA_BACKUP
     write_private_text(PROJECTS_FILE, json.dumps(projects, indent=2) + "\n")
-    PROJECT_DATA_BACKUP = None
+    PROJECT_DATA_STATE["backup"] = None
 
 
 def preserve_corrupt_projects() -> Path | None:
-    global PROJECT_DATA_BACKUP
-    if PROJECT_DATA_BACKUP is not None:
-        return PROJECT_DATA_BACKUP
+    existing_backup = PROJECT_DATA_STATE["backup"]
+    if existing_backup is not None:
+        return existing_backup
     ensure_private_directory(BACKUP_DIR)
     backup = BACKUP_DIR / (
         f"control-projects.corrupt-{time.strftime('%Y%m%d-%H%M%S')}.json"
@@ -719,7 +722,7 @@ def preserve_corrupt_projects() -> Path | None:
         backup.chmod(0o600)
     except OSError:
         return None
-    PROJECT_DATA_BACKUP = backup
+    PROJECT_DATA_STATE["backup"] = backup
     return backup
 
 
@@ -1102,6 +1105,7 @@ def open_private_log(project_id: str):
     try:
         path.chmod(0o600)
     except OSError:
+        # Logging should continue on filesystems that cannot change POSIX modes.
         pass
     return os.fdopen(descriptor, "ab")
 
@@ -1273,6 +1277,7 @@ def stop_processes(
             try:
                 os.killpg(process.pid, signal.SIGTERM)
             except ProcessLookupError:
+                # The process group exited between the ownership check and the signal.
                 pass
             except OSError as error:
                 errors.append(f"{project_id}: graceful stop failed: {error}")
@@ -1292,6 +1297,7 @@ def stop_processes(
             try:
                 os.killpg(process.pid, signal.SIGKILL)
             except ProcessLookupError:
+                # The process group exited during the graceful-stop window.
                 pass
             except OSError as error:
                 errors.append(f"{project_id}: forced stop failed: {error}")
@@ -1301,6 +1307,7 @@ def stop_processes(
             try:
                 process.wait(timeout=1)
             except subprocess.TimeoutExpired:
+                # The ownership check below decides whether the group still needs attention.
                 pass
             if process_group_is_running(process.pid):
                 errors.append(f"{project_id}: the managed process group did not exit")
@@ -1829,6 +1836,7 @@ def main() -> None:
         try:
             PROJECTS_FILE.chmod(0o600)
         except OSError:
+            # Startup can continue on filesystems without POSIX permission support.
             pass
     server = BoundedThreadingHTTPServer((HOST, PORT), ControlHandler)
     monitor_stop = threading.Event()

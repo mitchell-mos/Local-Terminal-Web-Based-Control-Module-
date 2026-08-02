@@ -10,11 +10,11 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
-import threading
+import unittest.mock
 from pathlib import Path
-from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -42,7 +42,7 @@ class ControlServerTests(unittest.TestCase):
         control_server.BACKUP_DIR = control_server.DATA_DIR / "backups"
         control_server.SESSION_TOKEN_FILE = control_server.RUNTIME_DIR / "session-token"
         control_server.SESSION_TOKEN = ""
-        control_server.PROJECT_DATA_BACKUP = None
+        control_server.PROJECT_DATA_STATE["backup"] = None
         control_server.PROCESSES.clear()
         control_server.PROCESS_ERRORS.clear()
         control_server.PROCESS_STOP_REASONS.clear()
@@ -92,7 +92,7 @@ class ControlServerTests(unittest.TestCase):
             )
 
     def test_action_rate_limit_is_scoped_to_each_project(self) -> None:
-        with mock.patch.object(control_server.time, "monotonic", return_value=100.0):
+        with unittest.mock.patch.object(control_server.time, "monotonic", return_value=100.0):
             control_server.enforce_action_rate_limit(["first-project"])
             control_server.enforce_action_rate_limit(["second-project"])
 
@@ -129,8 +129,8 @@ class ControlServerTests(unittest.TestCase):
         )
 
         with (
-            mock.patch.object(control_server.sys, "platform", "darwin"),
-            mock.patch.object(control_server.subprocess, "run", return_value=completed) as run,
+            unittest.mock.patch.object(control_server.sys, "platform", "darwin"),
+            unittest.mock.patch.object(control_server.subprocess, "run", return_value=completed) as run,
         ):
             result = control_server.project_browser_tabs("local-site", "refresh")
 
@@ -169,8 +169,8 @@ class ControlServerTests(unittest.TestCase):
         )
 
         with (
-            mock.patch.object(control_server.sys, "platform", "darwin"),
-            mock.patch.object(control_server.subprocess, "run", return_value=denied),
+            unittest.mock.patch.object(control_server.sys, "platform", "darwin"),
+            unittest.mock.patch.object(control_server.subprocess, "run", return_value=denied),
         ):
             result = control_server.project_browser_tabs("local-site", "refresh")
 
@@ -214,8 +214,8 @@ class ControlServerTests(unittest.TestCase):
             stderr="",
         )
         with (
-            mock.patch.object(control_server.subprocess, "run", return_value=completed) as run,
-            mock.patch.object(control_server.os, "getpgid", side_effect=lambda pid: pid + 1000),
+            unittest.mock.patch.object(control_server.subprocess, "run", return_value=completed) as run,
+            unittest.mock.patch.object(control_server.os, "getpgid", side_effect=lambda pid: pid + 1000),
         ):
             owners = control_server.listener_process_groups_by_port({4321, 4322})
 
@@ -228,13 +228,13 @@ class ControlServerTests(unittest.TestCase):
             {"id": "two", "name": "Two", "host": "127.0.0.1", "port": 4322},
         ]
         control_server.PROCESSES.update({
-            "one": mock.Mock(pid=111),
-            "two": mock.Mock(pid=222),
+            "one": unittest.mock.Mock(pid=111),
+            "two": unittest.mock.Mock(pid=222),
         })
         with (
-            mock.patch.object(control_server, "process_is_running", return_value=True),
-            mock.patch.object(control_server, "port_is_open", return_value=True),
-            mock.patch.object(
+            unittest.mock.patch.object(control_server, "process_is_running", return_value=True),
+            unittest.mock.patch.object(control_server, "port_is_open", return_value=True),
+            unittest.mock.patch.object(
                 control_server,
                 "listener_process_groups_by_port",
                 return_value={4321: {111}, 4322: {222}},
@@ -358,7 +358,7 @@ class ControlServerTests(unittest.TestCase):
                 })
 
     def test_available_port_suggestions_skip_browser_blocked_ports(self) -> None:
-        with mock.patch.object(control_server, "port_is_open", return_value=False):
+        with unittest.mock.patch.object(control_server, "port_is_open", return_value=False):
             self.assertEqual(
                 control_server.find_available_port("127.0.0.1", 5999),
                 6001,
@@ -534,14 +534,14 @@ class ControlServerTests(unittest.TestCase):
             control_server.run_project_hook(project, "setupCommand", "Setup", timeout=2)
 
     def test_project_hook_closes_log_when_process_cannot_launch(self) -> None:
-        log_context = mock.MagicMock()
-        log_file = mock.MagicMock()
+        log_context = unittest.mock.MagicMock()
+        log_file = unittest.mock.MagicMock()
         log_context.__enter__.return_value = log_file
         project = {"id": "failed-hook", "setupCommand": "exit 0"}
 
         with (
-            mock.patch.object(control_server, "open_private_log", return_value=log_context),
-            mock.patch.object(
+            unittest.mock.patch.object(control_server, "open_private_log", return_value=log_context),
+            unittest.mock.patch.object(
                 control_server.subprocess,
                 "Popen",
                 side_effect=FileNotFoundError("shell not found"),
@@ -576,7 +576,7 @@ class ControlServerTests(unittest.TestCase):
 
     def test_cors_header_uses_only_canonical_origin_constants(self) -> None:
         handler = object.__new__(control_server.ControlHandler)
-        handler.send_header = mock.Mock()
+        handler.send_header = unittest.mock.Mock()
 
         handler.headers = {"Origin": control_server.DASHBOARD_LOOPBACK_ORIGIN}
         handler.send_allowed_origin_header()
@@ -602,7 +602,7 @@ class ControlServerTests(unittest.TestCase):
             stdout=f"{selected}\n",
             stderr="",
         )
-        with mock.patch.object(control_server.subprocess, "run", return_value=completed) as run:
+        with unittest.mock.patch.object(control_server.subprocess, "run", return_value=completed) as run:
             result = control_server.choose_project_folder()
 
         self.assertEqual(result, {"cancelled": False, "path": str(selected.resolve())})
@@ -615,7 +615,7 @@ class ControlServerTests(unittest.TestCase):
             stdout="",
             stderr="execution error: User canceled. (-128)\n",
         )
-        with mock.patch.object(control_server.subprocess, "run", return_value=cancelled):
+        with unittest.mock.patch.object(control_server.subprocess, "run", return_value=cancelled):
             self.assertEqual(control_server.choose_project_folder(), {"cancelled": True})
 
     def test_native_apps_are_verified_for_the_current_instance(self) -> None:
@@ -661,6 +661,7 @@ class ControlServerTests(unittest.TestCase):
                     os.environ[key] = value
 
     def test_runner_rejects_unauthorized_browser_requests(self) -> None:
+        server: control_server.BoundedThreadingHTTPServer | None = None
         try:
             server = control_server.BoundedThreadingHTTPServer(
                 ("127.0.0.1", 0),
@@ -668,6 +669,8 @@ class ControlServerTests(unittest.TestCase):
             )
         except PermissionError:
             self.skipTest("the current sandbox does not permit local HTTP tests")
+        if server is None:
+            self.fail("the local HTTP test server was not created")
 
         port = server.server_address[1]
         previous_hosts = control_server.ALLOWED_HOSTS

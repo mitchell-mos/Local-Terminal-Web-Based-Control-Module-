@@ -434,7 +434,7 @@ test("ships relocatable native setup and uninstall apps", async () => {
   assert.match(installer, /--web-port/);
   assert.match(installer, /web-port/);
   assert.match(installer, /chmod 600/);
-  assert.match(installer, /nodejs\.org\/download\/release/);
+  assert.ok(installer.includes("nodejs.org/download/release"));
   assert.match(installer, /NODE_SHA256/);
   assert.match(installer, /shasum -a 256/);
   assert.match(installer, /runtime_is_valid/);

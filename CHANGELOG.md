@@ -6,6 +6,12 @@ Notable user-facing changes are recorded here. Versions use `vMAJOR.UPDATE.FIX`.
 
 - No unreleased changes.
 
+## v1.01.2
+
+- Resolved CodeQL findings in URL-oriented test assertions, test-server initialization, and theme-state setup.
+- Clarified intentionally ignored filesystem and process-race exceptions without changing runtime behavior.
+- Simplified corrupt-project backup state tracking and Python test imports.
+
 ## v1.01.1
 
 - Fixed the release-version check so automated dependency maintenance can merge without publishing an unrelated app release.

@@ -483,6 +483,7 @@ prepare_private_workspace() {
     next.config.ts
     tsconfig.json
     vite.config.ts
+    version.json
   )
   for source_item in "${source_items[@]}"; do
     [[ -e "$SOURCE_DIR/$source_item" ]] || continue

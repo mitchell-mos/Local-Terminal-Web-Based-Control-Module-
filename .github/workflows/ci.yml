@@ -44,7 +44,7 @@ jobs:
       - name: Check scripts and property lists
         run: |
           zsh -n ControlModule support/mac/*.sh
-          plutil -lint support/mac/App.plist
+          plutil -lint support/mac/App.plist support/mac/Setup.plist
 
       - name: Build native launchers from source
         run: |
@@ -56,7 +56,7 @@ jobs:
         run: |
           plutil -lint "$RUNNER_TEMP/control-module-launchers/Setup.app/Contents/Info.plist"
           plutil -lint "$RUNNER_TEMP/control-module-launchers/Uninstall.app/Contents/Info.plist"
-          file "$RUNNER_TEMP/control-module-launchers/Setup.app/Contents/MacOS/applet" | grep -q arm64
+          file "$RUNNER_TEMP/control-module-launchers/Setup.app/Contents/MacOS/Setup" | grep -q arm64
           file "$RUNNER_TEMP/control-module-launchers/Uninstall.app/Contents/MacOS/applet" | grep -q arm64
 
       - name: Verify app signatures

@@ -17,11 +17,13 @@ Guided Setup downloads the official Node.js 24.17.0 ARM64 runtime directly from 
 
 Download the ARM64 archive from [GitHub Releases](https://github.com/mitchell-mos/Local-Terminal-Web-Based-Control-Module-/releases), keep `Setup.app` inside its extracted Control Module folder, and double-click it. Setup lets you:
 
+- review whether this copy is installed, running, stopped, or ready for an update;
 - select the dashboard port, with `1025` recommended;
 - use a private Application Support working copy or the downloaded checkout;
 - install the launcher in the project folder or your personal Applications folder;
 - optionally create one Desktop shortcut; and
-- optionally open Control Module when installation finishes.
+- optionally open Control Module when installation finishes; and
+- safely start, stop, restart, or refresh the status of an existing installation.
 
 Setup verifies the checkout containing it and never asks you to select arbitrary Control Module files in Finder. Private mode keeps project definitions, logs, settings, and the optimized standalone dashboard under `~/Library/Application Support/Control Module/instances/<instance-id>/` with access limited to your account.
 
@@ -40,13 +42,13 @@ chmod +x ControlModule
 ./ControlModule
 ```
 
-The native Setup and Uninstall apps are generated from the reviewable AppleScript and shell sources under `support/mac/`. Generated app bundles are release artifacts and are intentionally not committed to the source repository.
+The native Setup and Uninstall apps are generated from reviewable Objective-C, AppleScript, property-list, and shell sources under `support/mac/`. Generated app bundles are release artifacts and are intentionally not committed to the source repository.
 
 Each packaged release includes a SHA-256 checksum and GitHub build-provenance attestation. You can verify them before opening Setup:
 
 ```sh
-shasum -a 256 -c Control-Module-v1.02.0-macOS-arm64.zip.sha256
-gh attestation verify Control-Module-v1.02.0-macOS-arm64.zip --repo mitchell-mos/Local-Terminal-Web-Based-Control-Module-
+shasum -a 256 -c Control-Module-v1.03.0-macOS-arm64.zip.sha256
+gh attestation verify Control-Module-v1.03.0-macOS-arm64.zip --repo mitchell-mos/Local-Terminal-Web-Based-Control-Module-
 ```
 
 ## Projects

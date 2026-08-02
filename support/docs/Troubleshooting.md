@@ -12,6 +12,14 @@ Install Python 3.11 or newer and reopen Control Module. The bundled runtime supp
 
 Run `Setup.app` again and select a free dashboard port. Setup will not kill an unrelated listener. The private runner port is selected automatically and may change without changing the dashboard address.
 
+## Setup shows an older installed version
+
+Setup compares the downloaded source with that copy's private working directory. Choose **Update & apply** to replace the installed app and working copy while keeping its saved projects, logs, and settings. A browser refresh alone cannot update an older local server process.
+
+## Control Module is only partially running
+
+Open `Setup.app` and choose **Restart** under Services. Setup safely stops processes owned by this installation before reopening its verified app. It does not stop an unrelated listener that happens to use another port.
+
 ## A project does not start
 
 Check that its port is free, the Start command contains the same port, and every folder or executable in the command exists. Open the project error summary, then inspect its private full log when more detail is needed. Control Module does not install a project's dependencies automatically.

@@ -6,6 +6,12 @@ Notable user-facing changes are recorded here. Versions use `vMAJOR.UPDATE.FIX`.
 
 - No unreleased changes.
 
+## v1.03.0
+
+- Replaced the sequential Setup dialogs with a larger native macOS interface that detects and explains existing installations.
+- Added ownership-checked status, Start, Stop, and Restart controls to Setup, including confirmation and in-progress cancellation states.
+- Preserved release metadata in private working copies so Setup can clearly distinguish installed and available versions.
+
 ## v1.02.1
 
 - Renamed the property-based fuzz suite to a JavaScript extension recognized by OpenSSF Scorecard while keeping it in the regular test run.

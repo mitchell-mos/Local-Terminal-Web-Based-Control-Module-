@@ -28,6 +28,8 @@ Source development uses the full dependency tree. Production builds use Vinext's
 
 Setup verifies the official Node.js ARM64 archive before extraction. It keeps Node, npm, Corepack, and licenses needed for first-run source builds, but removes C/C++ headers, manuals, and release documentation that the application does not execute.
 
+The native Setup window reads status through `support/mac/manage.sh`. Lifecycle actions resolve the current installation marker and saved paths before operating. Stop reuses the scoped uninstall backend's `--stop-only` path; Restart performs that same safe stop before reopening only the matching installed app.
+
 ## Boundaries
 
 - The product supports Apple silicon and macOS 13 or newer.

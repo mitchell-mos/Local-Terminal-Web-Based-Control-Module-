@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+    <key>CFBundleDisplayName</key>
+    <string>Setup</string>
+    <key>CFBundleExecutable</key>
+    <string>Setup</string>
+    <key>CFBundleIconFile</key>
+    <string>ControlModule</string>
+    <key>CFBundleIdentifier</key>
+    <string>io.github.mitchell-mos.control-module.setup</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>Setup</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0.0</string>
+    <key>CFBundleVersion</key>
+    <string>1.0.0</string>
+    <key>LSArchitecturePriority</key>
+    <array>
+        <string>arm64</string>
+    </array>
+    <key>LSMinimumSystemVersion</key>
+    <string>13.0</string>
+    <key>LSRequiresNativeExecution</key>
+    <true/>
+    <key>NSDesktopFolderUsageDescription</key>
+    <string>Setup reads only its verified Control Module download so you can choose whether the installed app uses Desktop.</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>NSPrincipalClass</key>
+    <string>NSApplication</string>
+</dict>
+</plist>

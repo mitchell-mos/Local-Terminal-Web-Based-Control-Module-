@@ -393,14 +393,16 @@ test("uninstall distinguishes a Finder copy with a duplicated instance marker", 
 });
 
 test("ships relocatable native setup and uninstall apps", async () => {
-  const [launcher, nativeLauncher, installer, uninstaller, builder, setupBuilder, setupSource, setupStore, removeBuilder, uninstallSource, iconBuilder, trashIcon, plist, readme, ciWorkflow, releaseBuilder] = await Promise.all([
+  const [launcher, nativeLauncher, installer, uninstaller, manager, builder, setupBuilder, setupSource, setupPlist, setupStore, removeBuilder, uninstallSource, iconBuilder, trashIcon, plist, readme, ciWorkflow, releaseBuilder] = await Promise.all([
     read("ControlModule"),
     read("support/mac/Launch.applescript"),
     read("support/mac/install.sh"),
     read("support/mac/uninstall.sh"),
+    read("support/mac/manage.sh"),
     read("support/mac/app.sh"),
     read("support/mac/setup.sh"),
-    read("support/mac/Setup.applescript"),
+    read("support/mac/Setup.m"),
+    read("support/mac/Setup.plist"),
     read("support/mac/store.sh"),
     read("support/mac/remove.sh"),
     read("support/mac/Uninstall.applescript"),
@@ -440,6 +442,7 @@ test("ships relocatable native setup and uninstall apps", async () => {
   assert.match(installer, /desktop-access/);
   assert.match(installer, /prepare_private_workspace/);
   assert.match(installer, /private workspace is replaced atomically/i);
+  assert.match(installer, /version\.json/);
   assert.ok(
     installer.indexOf('if web_port_is_reserved_by_other_instance "$WEB_PORT"; then')
       < installer.indexOf('"$SCRIPT_DIR/uninstall.sh" --source "$SOURCE_DIR" --stop-only'),
@@ -474,6 +477,15 @@ test("ships relocatable native setup and uninstall apps", async () => {
   assert.doesNotMatch(uninstaller, /rm -rf/);
   assert.match(uninstaller, /\.Trash/);
   assert.match(uninstaller, /Refusing to operate/);
+  assert.match(manager, /status\|start\|stop\|restart/);
+  assert.match(manager, /app_instance_id/);
+  assert.match(manager, /listener_uses_instance/);
+  assert.match(manager, /uninstall\.sh" --source "\$SOURCE_DIR" --stop-only/);
+  assert.match(manager, /\/usr\/bin\/open "\$INSTALL_APP"/);
+  assert.match(manager, /app_parent.*\$HOME\/Applications/);
+  assert.match(manager, /RUNTIME_DIR.*CONFIG_DIR\/workspace/);
+  assert.match(manager, /version_label/);
+  assert.match(manager, /\/usr\/bin\/base64/);
   assert.match(builder, /ControlModule\.icns/);
   assert.match(builder, /Launch\.applescript/);
   assert.match(builder, /lipo.*-thin arm64/);
@@ -487,33 +499,43 @@ test("ships relocatable native setup and uninstall apps", async () => {
   assert.match(plist, /NSAppleEventsUsageDescription/);
   assert.match(plist, /refresh or focus them after you restart a host/);
   assert.match(builder, /codesign --verify --deep "\$OUTPUT_APP"/);
-  assert.match(setupBuilder, /osacompile/);
+  assert.match(setupBuilder, /xcrun --sdk macosx clang/);
+  assert.match(setupBuilder, /Setup\.m/);
+  assert.match(setupBuilder, /Setup\.plist/);
   assert.match(setupBuilder, /Setup\.app/);
-  assert.match(setupBuilder, /lipo.*-thin arm64/);
-  assert.match(setupBuilder, /LSRequiresNativeExecution/);
+  assert.match(setupBuilder, /Contents\/MacOS\/Setup/);
+  assert.match(setupBuilder, /-target arm64-apple-macos13\.0/);
+  assert.match(setupBuilder, /lipo.*-verify_arch arm64/);
   assert.match(setupBuilder, /xattr -d com\.apple\.FinderInfo "\$OUTPUT_APP"/);
   assert.match(setupBuilder, /codesign --verify --deep --strict "\$STAGING_APP"/);
   assert.match(setupBuilder, /codesign --verify --deep "\$OUTPUT_APP"/);
+  assert.match(setupPlist, /LSRequiresNativeExecution/);
+  assert.match(setupPlist, /arm64/);
+  assert.match(setupPlist, /CFBundleExecutable/);
+  assert.match(setupPlist, /<string>Setup<\/string>/);
   assert.match(ciWorkflow, /support\/mac\/setup\.sh/);
   assert.match(ciWorkflow, /support\/mac\/remove\.sh/);
   assert.match(releaseBuilder, /support\/mac\/setup\.sh/);
   assert.match(releaseBuilder, /support\/mac\/remove\.sh/);
   assert.match(setupSource, /Dashboard port/);
   assert.match(setupSource, /--web-port/);
-  assert.match(setupSource, /Desktop access/);
-  assert.match(setupSource, /Keep Desktop private/);
   assert.match(setupSource, /--desktop-access/);
+  assert.match(setupSource, /--desktop-shortcut/);
   assert.match(setupSource, /support\/mac\/store\.sh/);
+  assert.match(setupSource, /support\/mac\/manage\.sh/);
+  assert.match(setupSource, /Existing installation found/);
+  assert.match(setupSource, /Update & apply/);
+  assert.match(setupSource, /Apply settings/);
+  assert.match(setupSource, /Cancel operation/);
+  assert.match(setupSource, /Start/);
+  assert.match(setupSource, /Stop/);
+  assert.match(setupSource, /Restart/);
   assert.match(setupSource, /Control Module folder/);
-  assert.doesNotMatch(setupSource, /installLocation is "Desktop"/);
   assert.match(setupSource, /Desktop shortcut/);
-  assert.doesNotMatch(setupSource, /Control Module and Setup shortcuts/);
-  assert.match(setupSource, /stay in the Control Module folder/);
-  assert.match(setupSource, /dashboard, settings, and saved projects stay on this Mac/i);
+  assert.match(setupSource, /Keep Setup\.app in the downloaded Control Module folder/);
+  assert.match(setupSource, /Changes apply only to this verified Control Module copy/);
+  assert.match(setupSource, /URLByDeletingLastPathComponent/);
   assert.doesNotMatch(setupSource, /choose folder/i);
-  assert.match(setupSource, /parentFolder/);
-  assert.match(setupSource, /\/bin\/test/);
-  assert.doesNotMatch(setupSource, /\/usr\/bin\/test/);
   assert.match(setupStore, /SOURCE_DIR\/Setup\.app/);
   assert.match(setupStore, /Desktop\/Setup\.app/);
   assert.doesNotMatch(setupStore, /ln -s/);

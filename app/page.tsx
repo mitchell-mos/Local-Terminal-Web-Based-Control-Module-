@@ -4,10 +4,17 @@ import type { ChangeEvent, DragEvent as ReactDragEvent, FormEvent, KeyboardEvent
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import { APP_VERSION_LABEL } from "@/lib/version";
+import {
+  FilterSelect,
+  ProcessCommandTabs,
+  ToastRegion,
+  type ProcessCommandKind,
+  type Toast,
+  type ToastKind,
+} from "./control-components";
 
 type Host = "localhost" | "127.0.0.1";
 type Theme = "light" | "dark";
-type ToastKind = "success" | "error" | "info";
 type StatusFilter = "all" | "running" | "stopped";
 type SortBy = "manual" | "updated" | "name" | "port";
 type SortOrder = "ascending" | "descending";
@@ -15,12 +22,12 @@ type ProjectView = "list" | "cards";
 type ThemeEditorLevel = "basic" | "advanced";
 type ProjectFormMode = "basic" | "advanced";
 type BasicProjectKind = "auto" | "static" | "vite" | "next" | "package";
-type ProcessCommandKind = "setup" | "start" | "stop" | "restart";
 type ProjectInspectionState = "idle" | "checking" | "ready" | "error";
 
 type PortableProject = {
   name: string;
   port: number;
+  publicUrl: string;
   command: string;
   setupCommand: string;
   stopCommand: string;
@@ -44,6 +51,7 @@ type Project = {
   name: string;
   host: Host;
   port: number;
+  publicUrl?: string;
   command: string;
   setupCommand?: string;
   stopCommand?: string;
@@ -56,9 +64,31 @@ type Project = {
   stopReason?: string;
 };
 
+type RestartPrompt = {
+  project: Project;
+  tabWasOpen: boolean;
+  tabReloaded: boolean;
+  tabCount: number;
+  browserNames: string[];
+  nativeTabManaged: boolean;
+  permissionDenied: boolean;
+};
+
+type TrackedProjectWindow = {
+  window: Window;
+  host: Host;
+};
+
 type ProjectDropTarget = {
   id: string;
   position: "before" | "after";
+};
+
+type ProjectFilterPreferences = {
+  portSearch: string;
+  status: StatusFilter;
+  sortBy: SortBy;
+  sortOrder: SortOrder;
 };
 
 function reorderProjectList(
@@ -78,12 +108,29 @@ function reorderProjectList(
   return withoutSource;
 }
 
-type Toast = {
-  id: string;
-  kind: ToastKind;
-  title: string;
-  description: string;
-};
+function handleMenuKeyDown(
+  event: ReactKeyboardEvent<HTMLElement>,
+  closeMenu: () => void,
+) {
+  const items = Array.from(
+    event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="menuitem"]:not(:disabled)'),
+  );
+  if (items.length === 0) return;
+  const currentIndex = Math.max(0, items.indexOf(document.activeElement as HTMLButtonElement));
+  let nextIndex: number;
+  if (event.key === "ArrowDown") nextIndex = (currentIndex + 1) % items.length;
+  else if (event.key === "ArrowUp") nextIndex = (currentIndex - 1 + items.length) % items.length;
+  else if (event.key === "Home") nextIndex = 0;
+  else if (event.key === "End") nextIndex = items.length - 1;
+  else if (event.key === "Escape") {
+    event.preventDefault();
+    event.stopPropagation();
+    closeMenu();
+    return;
+  } else return;
+  event.preventDefault();
+  items[nextIndex]?.focus();
+}
 
 type ApiError = {
   error?: string;
@@ -98,6 +145,15 @@ type PortAvailability = {
 type PortFeedback = {
   kind: "success" | "error" | "checking";
   message: string;
+};
+
+type BrowserTabResult = {
+  available: boolean;
+  matched: number;
+  refreshed: number;
+  focused: number;
+  permissionDenied: boolean;
+  browsers: string[];
 };
 
 type BasicProjectInspection = {
@@ -169,25 +225,13 @@ type ThemePreset = {
   colors: ThemeColors;
 };
 
-type FilterSelectOption<T extends string> = {
-  value: T;
-  label: string;
-};
-
-type FilterSelectProps<T extends string> = {
-  id: string;
-  label: string;
-  value: T;
-  options: FilterSelectOption<T>[];
-  onChange: (value: T) => void;
-};
-
 const LEGACY_STORAGE_KEY = "control-module-projects-v1";
 const IMPORTED_KEY = "control-module-projects-imported-v2";
 const THEME_KEY = "control-module-theme";
 const CUSTOM_THEMES_KEY = "control-module-custom-themes-v1";
 const SELECTED_THEMES_KEY = "control-module-selected-themes-v1";
 const PROJECT_VIEW_KEY = "control-module-project-view";
+const PROJECT_FILTERS_KEY = "control-module-project-filters-v1";
 const SCROLL_POSITION_KEY = "control-module-scroll-position";
 const PRIMARY_HOST: Host = "127.0.0.1";
 const ACTION_RATE_LIMIT_MS = 1000;
@@ -714,6 +758,24 @@ function getUrl(host: Host, port: number | string) {
   return `http://${host}:${port}`;
 }
 
+function publishedUrlError(value: string) {
+  const trimmed = value.trim();
+  if (!trimmed) return "";
+  if (trimmed.length > 2048) return "Keep the published-site address under 2,048 characters.";
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      return "Use an http:// or https:// address.";
+    }
+    if (!parsed.hostname || parsed.username || parsed.password) {
+      return "Enter a public website address without a username or password.";
+    }
+  } catch {
+    return "Enter a complete address, such as https://example.com.";
+  }
+  return "";
+}
+
 function replaceCommandPort(command: string, oldPort: number, newPort: number) {
   return command.replace(new RegExp(`\\b${oldPort}\\b`, "g"), String(newPort));
 }
@@ -759,6 +821,7 @@ function parseProjectTransfer(text: string, fileName: string): ProjectImportPrev
     const name = typeof candidate.name === "string" ? candidate.name.trim() : "";
     const port = typeof candidate.port === "number" ? candidate.port : Number.NaN;
     const command = typeof candidate.command === "string" ? candidate.command.trim() : "";
+    const publicUrl = typeof candidate.publicUrl === "string" ? candidate.publicUrl.trim() : "";
     const setupCommand = typeof candidate.setupCommand === "string" ? candidate.setupCommand.trim() : "";
     const stopCommand = typeof candidate.stopCommand === "string" ? candidate.stopCommand.trim() : "";
     const restartCommand = typeof candidate.restartCommand === "string" ? candidate.restartCommand.trim() : "";
@@ -772,6 +835,8 @@ function parseProjectTransfer(text: string, fileName: string): ProjectImportPrev
       reason = `Port ${port} is blocked by browsers.`;
     } else if (seenPorts.has(port)) {
       reason = `Port ${port} is duplicated in this file.`;
+    } else if (publishedUrlError(publicUrl)) {
+      reason = publishedUrlError(publicUrl);
     } else if (!command || command.length > 4096) {
       reason = "Start command must contain 1–4,096 characters.";
     } else if (!commandHasPort(command, port)) {
@@ -787,7 +852,7 @@ function parseProjectTransfer(text: string, fileName: string): ProjectImportPrev
       return;
     }
     seenPorts.add(port);
-    projects.push({ name, port, command, setupCommand, stopCommand, restartCommand });
+    projects.push({ name, port, publicUrl, command, setupCommand, stopCommand, restartCommand });
   });
 
   return { fileName, projects, issues };
@@ -795,6 +860,13 @@ function parseProjectTransfer(text: string, fileName: string): ProjectImportPrev
 
 function getLocalAddressLabel(port: number | string) {
   return `localhost:${port} & 127.0.0.1:${port}`;
+}
+
+function browserNamesLabel(names: string[]) {
+  if (names.length === 0) return "your browser";
+  if (names.length === 1) return names[0];
+  if (names.length === 2) return `${names[0]} and ${names[1]}`;
+  return `${names.slice(0, -1).join(", ")}, and ${names[names.length - 1]}`;
 }
 
 function getAddedDetails(createdAt: number) {
@@ -851,123 +923,10 @@ async function apiRequest<T>(path: string, options?: RequestInit): Promise<T> {
   return data;
 }
 
-function FilterSelect<T extends string,>({
-  id,
-  label,
-  value,
-  options,
-  onChange,
-}: FilterSelectProps<T>) {
-  const [open, setOpen] = useState(false);
-  const rootRef = useRef<HTMLDivElement>(null);
-  const triggerRef = useRef<HTMLButtonElement>(null);
-  const optionRefs = useRef<Array<HTMLButtonElement | null>>([]);
-  const selectedIndex = Math.max(0, options.findIndex((option) => option.value === value));
-  const selectedOption = options[selectedIndex];
-  const labelId = `${id}-label`;
-  const listboxId = `${id}-options`;
-
-  useEffect(() => {
-    if (!open) return;
-    function closeOutside(event: PointerEvent) {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
-    }
-    document.addEventListener("pointerdown", closeOutside);
-    return () => document.removeEventListener("pointerdown", closeOutside);
-  }, [open]);
-
-  function focusOption(index: number) {
-    window.requestAnimationFrame(() => optionRefs.current[index]?.focus());
-  }
-
-  function openFromKeyboard(index: number) {
-    setOpen(true);
-    focusOption(index);
-  }
-
-  function handleTriggerKeyDown(event: ReactKeyboardEvent<HTMLButtonElement>) {
-    if (event.key === "ArrowDown") {
-      event.preventDefault();
-      openFromKeyboard(selectedIndex);
-    } else if (event.key === "ArrowUp") {
-      event.preventDefault();
-      openFromKeyboard(selectedIndex);
-    }
-  }
-
-  function handleOptionKeyDown(
-    event: ReactKeyboardEvent<HTMLButtonElement>,
-    index: number,
-  ) {
-    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
-      event.preventDefault();
-      const offset = event.key === "ArrowDown" ? 1 : -1;
-      focusOption((index + offset + options.length) % options.length);
-    } else if (event.key === "Home" || event.key === "End") {
-      event.preventDefault();
-      focusOption(event.key === "Home" ? 0 : options.length - 1);
-    } else if (event.key === "Escape") {
-      event.preventDefault();
-      event.stopPropagation();
-      setOpen(false);
-      triggerRef.current?.focus();
-    }
-  }
-
-  function chooseOption(option: FilterSelectOption<T>) {
-    onChange(option.value);
-    setOpen(false);
-    triggerRef.current?.focus();
-  }
-
-  return (
-    <div className="field compact-field filter-select" ref={rootRef}>
-      <span className="filter-select-label" id={labelId}>{label}</span>
-      <button
-        className={`filter-select-trigger ${open ? "open" : ""}`}
-        id={id}
-        ref={triggerRef}
-        type="button"
-        aria-haspopup="listbox"
-        aria-expanded={open}
-        aria-controls={listboxId}
-        aria-labelledby={`${labelId} ${id}-value`}
-        onClick={() => setOpen((current) => !current)}
-        onKeyDown={handleTriggerKeyDown}
-      >
-        <span id={`${id}-value`}>{selectedOption.label}</span>
-        <span className="filter-select-chevron" aria-hidden="true" />
-      </button>
-      {open && (
-        <div className="filter-select-menu" id={listboxId} role="listbox" aria-labelledby={labelId}>
-          {options.map((option, index) => {
-            const selected = option.value === value;
-            return (
-              <button
-                className={`filter-select-option ${selected ? "selected" : ""}`}
-                key={option.value}
-                ref={(element) => { optionRefs.current[index] = element; }}
-                type="button"
-                role="option"
-                aria-selected={selected}
-                tabIndex={selected ? 0 : -1}
-                onClick={() => chooseOption(option)}
-                onKeyDown={(event) => handleOptionKeyDown(event, index)}
-              >
-                <span>{option.label}</span>
-                {selected && <span className="filter-select-check" aria-hidden="true">✓</span>}
-              </button>
-            );
-          })}
-        </div>
-      )}
-    </div>
-  );
-}
-
 export default function Home() {
   const [name, setName] = useState("");
   const [port, setPort] = useState("");
+  const [publicUrl, setPublicUrl] = useState("");
   const [command, setCommand] = useState("");
   const [setupCommand, setSetupCommand] = useState("");
   const [stopCommand, setStopCommand] = useState("");
@@ -979,7 +938,7 @@ export default function Home() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [isReady, setIsReady] = useState(false);
   const [runnerOnline, setRunnerOnline] = useState(false);
-  const [busyId, setBusyId] = useState<string | null>(null);
+  const [busyProjectIds, setBusyProjectIds] = useState<Record<string, boolean>>({});
   const [restartingIds, setRestartingIds] = useState<Record<string, boolean>>({});
   const [projectToDelete, setProjectToDelete] = useState<Project | null>(null);
   const [deleteConfirmation, setDeleteConfirmation] = useState("");
@@ -1030,13 +989,16 @@ export default function Home() {
   const [sortBy, setSortBy] = useState<SortBy>("manual");
   const [sortOrder, setSortOrder] = useState<SortOrder>("descending");
   const [projectView, setProjectView] = useState<ProjectView>("list");
+  const [projectPreferencesLoaded, setProjectPreferencesLoaded] = useState(false);
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedProjectIds, setSelectedProjectIds] = useState<Record<string, boolean>>({});
   const [stopAllOpen, setStopAllOpen] = useState(false);
-  const [restartPromptProject, setRestartPromptProject] = useState<Project | null>(null);
+  const [restartPrompt, setRestartPrompt] = useState<RestartPrompt | null>(null);
+  const [restartPromptOpening, setRestartPromptOpening] = useState(false);
   const [isStartingAll, setIsStartingAll] = useState(false);
   const [isStoppingAll, setIsStoppingAll] = useState(false);
   const [actionCooldownActive, setActionCooldownActive] = useState(false);
+  const [projectCooldownIds, setProjectCooldownIds] = useState<Record<string, boolean>>({});
   const [toasts, setToasts] = useState<Toast[]>([]);
   const statusSnapshot = useRef<Record<string, boolean>>({});
   const expectedStops = useRef<Set<string>>(new Set());
@@ -1049,14 +1011,19 @@ export default function Home() {
   const projectInspectionSequence = useRef(0);
   const suggestedProjectName = useRef("");
   const syncedCommandPort = useRef<number | null>(null);
-  const projectWindows = useRef<Record<string, Window | null>>({});
+  const projectWindows = useRef<Record<string, TrackedProjectWindow | null>>({});
   const restartTriggerRef = useRef<HTMLButtonElement | null>(null);
   const lastActionAt = useRef(0);
   const actionCooldownTimer = useRef<number | null>(null);
+  const projectActionTimes = useRef<Record<string, number>>({});
+  const projectCooldownTimers = useRef<Record<string, number>>({});
   const scrollRestored = useRef(false);
   const pendingScrollPosition = useRef<number | null>(null);
   const dialogReturnFocusRef = useRef<HTMLElement | null>(null);
   const appSettingsDialogRef = useRef<HTMLElement | null>(null);
+  const draggingProjectIdRef = useRef<string | null>(null);
+  const projectDropTargetRef = useRef<ProjectDropTarget | null>(null);
+  const dragPreviewRef = useRef<HTMLElement | null>(null);
 
   const editingProject = editingId
     ? projects.find((project) => project.id === editingId) || null
@@ -1071,6 +1038,7 @@ export default function Home() {
     && commandHasPort(command, numericPort);
   const restartCommandPortSynced = !restartCommand.trim()
     || (validPort && commandHasPort(restartCommand, numericPort));
+  const publishedSiteError = publishedUrlError(publicUrl);
   const commandPortMismatch = validPort && Boolean(command.trim()) && !commandPortSynced;
   const portConfirmedAvailable = portFeedback?.kind === "success" && suggestedPort === null;
   const addBasicMode = addProjectOpen && !editingId && projectFormMode === "basic";
@@ -1082,19 +1050,22 @@ export default function Home() {
   );
   const formFieldsComplete = Boolean(name.trim() && port && command.trim());
   const canSubmitProject = editingProjectIsRunning
-    ? Boolean(name.trim() && runnerOnline && !actionCooldownActive)
+    ? Boolean(name.trim() && !publishedSiteError && runnerOnline && !actionCooldownActive)
     : formFieldsComplete
       && validPort
       && commandPortSynced
       && restartCommandPortSynced
       && portConfirmedAvailable
+      && !publishedSiteError
       && basicProjectReady
       && runnerOnline
       && !actionCooldownActive;
   const submitDisabledReason = !name.trim()
     ? "Enter a project name."
     : editingProjectIsRunning
-      ? !runnerOnline
+      ? publishedSiteError
+        ? publishedSiteError
+        : !runnerOnline
         ? "The command runner is offline."
         : actionCooldownActive
           ? "Please wait before saving again."
@@ -1163,6 +1134,39 @@ export default function Home() {
     }, ACTION_RATE_LIMIT_MS);
     return true;
   }, [notify]);
+
+  const beginProjectRateLimitedAction = useCallback((projectId: string) => {
+    const now = Date.now();
+    const remaining = ACTION_RATE_LIMIT_MS - (now - (projectActionTimes.current[projectId] || 0));
+    if (remaining > 0) {
+      notify("info", "Please wait", "This project can run one action per second.");
+      return false;
+    }
+
+    projectActionTimes.current[projectId] = now;
+    setProjectCooldownIds((current) => ({ ...current, [projectId]: true }));
+    const existingTimer = projectCooldownTimers.current[projectId];
+    if (existingTimer) window.clearTimeout(existingTimer);
+    projectCooldownTimers.current[projectId] = window.setTimeout(() => {
+      setProjectCooldownIds((current) => {
+        const next = { ...current };
+        delete next[projectId];
+        return next;
+      });
+      delete projectCooldownTimers.current[projectId];
+    }, ACTION_RATE_LIMIT_MS);
+    return true;
+  }, [notify]);
+
+  const setProjectBusy = useCallback((projectId: string, busy: boolean) => {
+    setBusyProjectIds((current) => {
+      if (busy) return { ...current, [projectId]: true };
+      if (!(projectId in current)) return current;
+      const next = { ...current };
+      delete next[projectId];
+      return next;
+    });
+  }, []);
 
   const loadProjects = useCallback(async (showError = false) => {
     try {
@@ -1260,7 +1264,38 @@ export default function Home() {
     if (savedProjectView === "list" || savedProjectView === "cards") {
       setProjectView(savedProjectView);
     }
+    try {
+      const savedFilters = JSON.parse(
+        window.localStorage.getItem(PROJECT_FILTERS_KEY) || "{}",
+      ) as Partial<ProjectFilterPreferences>;
+      if (typeof savedFilters.portSearch === "string") {
+        setPortSearch(savedFilters.portSearch.replace(/\D/g, "").slice(0, 4));
+      }
+      if (["all", "running", "stopped"].includes(savedFilters.status || "")) {
+        setStatusFilter(savedFilters.status as StatusFilter);
+      }
+      if (["manual", "updated", "name", "port"].includes(savedFilters.sortBy || "")) {
+        setSortBy(savedFilters.sortBy as SortBy);
+      }
+      if (["ascending", "descending"].includes(savedFilters.sortOrder || "")) {
+        setSortOrder(savedFilters.sortOrder as SortOrder);
+      }
+    } catch {
+      window.localStorage.removeItem(PROJECT_FILTERS_KEY);
+    }
+    setProjectPreferencesLoaded(true);
   }, []);
+
+  useEffect(() => {
+    if (!projectPreferencesLoaded) return;
+    const preferences: ProjectFilterPreferences = {
+      portSearch,
+      status: statusFilter,
+      sortBy,
+      sortOrder,
+    };
+    window.localStorage.setItem(PROJECT_FILTERS_KEY, JSON.stringify(preferences));
+  }, [portSearch, projectPreferencesLoaded, sortBy, sortOrder, statusFilter]);
 
   useEffect(() => {
     if (!themePreferencesLoaded) return;
@@ -1312,6 +1347,7 @@ export default function Home() {
   useEffect(() => {
     return () => {
       if (actionCooldownTimer.current) window.clearTimeout(actionCooldownTimer.current);
+      Object.values(projectCooldownTimers.current).forEach((timer) => window.clearTimeout(timer));
     };
   }, []);
 
@@ -1331,7 +1367,7 @@ export default function Home() {
       || stopAllOpen
       || editingId
       || themeEditorOpen
-      || restartPromptProject
+      || restartPrompt
       || appSettingsOpen
       || nativeAppPrompt
       || importPreview,
@@ -1455,7 +1491,7 @@ export default function Home() {
   }, [loadProjects]);
 
   useEffect(() => {
-    if (!addProjectOpen && !projectToDelete && !stopAllOpen && !filtersOpen && !projectInfoId && !editingId && !themeEditorOpen && !restartPromptProject && !appSettingsOpen && !nativeAppPrompt && !transferMenuOpen && !importPreview) return;
+    if (!addProjectOpen && !projectToDelete && !stopAllOpen && !filtersOpen && !projectInfoId && !editingId && !themeEditorOpen && !restartPrompt && !appSettingsOpen && !nativeAppPrompt && !transferMenuOpen && !importPreview) return;
     function closeOnEscape(event: KeyboardEvent) {
       if (event.key === "Escape") {
         setProjectToDelete(null);
@@ -1471,8 +1507,9 @@ export default function Home() {
           setNativeAppPrompt(null);
           setAppSettingsOpen(false);
         }
-        if (restartPromptProject) {
-          setRestartPromptProject(null);
+        if (restartPrompt) {
+          setRestartPrompt(null);
+          setRestartPromptOpening(false);
           window.requestAnimationFrame(() => restartTriggerRef.current?.focus());
         }
         if (addProjectOpen) {
@@ -1485,7 +1522,7 @@ export default function Home() {
     }
     window.addEventListener("keydown", closeOnEscape);
     return () => window.removeEventListener("keydown", closeOnEscape);
-  }, [addProjectOpen, appSettingsOpen, editingId, filtersOpen, importPreview, isImportingProjects, isStoppingAll, nativeAppOpening, nativeAppPrompt, projectInfoId, projectToDelete, restartPromptProject, stopAllOpen, themeEditorOpen, transferMenuOpen]);
+  }, [addProjectOpen, appSettingsOpen, editingId, filtersOpen, importPreview, isImportingProjects, isStoppingAll, nativeAppOpening, nativeAppPrompt, projectInfoId, projectToDelete, restartPrompt, stopAllOpen, themeEditorOpen, transferMenuOpen]);
 
   useEffect(() => {
     function handleDesktopShortcut(event: KeyboardEvent) {
@@ -1517,6 +1554,9 @@ export default function Home() {
 
   useEffect(() => {
     if (!transferMenuOpen) return;
+    window.requestAnimationFrame(() => {
+      transferMenuRef.current?.querySelector<HTMLButtonElement>('[role="menuitem"]:not(:disabled)')?.focus();
+    });
     function closeTransferOutside(event: PointerEvent) {
       if (!transferMenuRef.current?.contains(event.target as Node)) setTransferMenuOpen(false);
     }
@@ -1526,6 +1566,11 @@ export default function Home() {
 
   useEffect(() => {
     if (!projectInfoId) return;
+    window.requestAnimationFrame(() => {
+      document.getElementById(`project-menu-${projectInfoId}`)
+        ?.querySelector<HTMLButtonElement>('[role="menuitem"]:not(:disabled)')
+        ?.focus();
+    });
     function closeProjectInfoOutside(event: PointerEvent) {
       const target = event.target;
       if (target instanceof Element && target.closest("[data-project-info]")) return;
@@ -1691,6 +1736,7 @@ export default function Home() {
   const activeFilterCount = Number(statusFilter !== "all")
     + Number(sortBy !== "manual");
   const hasProjectFilters = Boolean(portSearch || activeFilterCount);
+  const hasBusyProjects = Object.keys(busyProjectIds).length > 0;
   const canReorderProjects = runnerOnline
     && projects.length > 1
     && sortBy === "manual"
@@ -1700,7 +1746,7 @@ export default function Home() {
     && !isReorderingProjects
     && !isStartingAll
     && !isStoppingAll
-    && !busyId
+    && !hasBusyProjects
     && !actionCooldownActive;
   const reorderDisabledReason = projects.length < 2
     ? "Add another project to change the order"
@@ -1710,7 +1756,7 @@ export default function Home() {
         ? "Clear search and filters, then choose Manual order"
         : isReorderingProjects
           ? "Saving the project order"
-          : busyId || actionCooldownActive || isStartingAll || isStoppingAll
+          : hasBusyProjects || actionCooldownActive || isStartingAll || isStoppingAll
             ? "Wait for the current project action to finish"
             : "Project order is temporarily unavailable";
 
@@ -1799,6 +1845,7 @@ export default function Home() {
       projects: projects.map((project) => ({
         name: project.name,
         port: project.port,
+        publicUrl: project.publicUrl || "",
         command: project.command,
         setupCommand: project.setupCommand || "",
         stopCommand: project.stopCommand || "",
@@ -1884,6 +1931,7 @@ export default function Home() {
               name: project.name,
               host: PRIMARY_HOST,
               port: project.port,
+              publicUrl: project.publicUrl,
               command: project.command,
               setupCommand: project.setupCommand,
               stopCommand: project.stopCommand,
@@ -2109,6 +2157,7 @@ export default function Home() {
     syncedCommandPort.current = null;
     setName("");
     setPort("");
+    setPublicUrl("");
     setCommand("");
     setSetupCommand("");
     setStopCommand("");
@@ -2138,6 +2187,11 @@ export default function Home() {
       return false;
     }
     if (editingProjectIsRunning) {
+      if (publishedSiteError) {
+        setError(publishedSiteError);
+        notify("error", "Invalid published site", publishedSiteError);
+        return false;
+      }
       setError("");
       return true;
     }
@@ -2178,6 +2232,11 @@ export default function Home() {
         : "Choose a port that is confirmed available.";
       setError(detail);
       notify("error", "Port not ready", detail);
+      return false;
+    }
+    if (publishedSiteError) {
+      setError(publishedSiteError);
+      notify("error", "Invalid published site", publishedSiteError);
       return false;
     }
     if (command.length > 4096) {
@@ -2230,6 +2289,7 @@ export default function Home() {
           name: projectName,
           host: PRIMARY_HOST,
           port: selectedPort,
+          publicUrl: publicUrl.trim(),
           command: selectedCommand,
           setupCommand: setupCommand.trim(),
           stopCommand: stopCommand.trim(),
@@ -2254,6 +2314,7 @@ export default function Home() {
     syncedCommandPort.current = project.port;
     setName(project.name);
     setPort(String(project.port));
+    setPublicUrl(project.publicUrl || "");
     setCommand(project.command);
     setSetupCommand(project.setupCommand || "");
     setStopCommand(project.stopCommand || "");
@@ -2300,49 +2361,123 @@ export default function Home() {
     return `control-module-project-${projectId}`;
   }
 
-  function openProject(project: Project) {
+  function projectUrl(project: Project, host: Host, forceReload = false) {
+    const url = new URL(getUrl(host, project.port));
+    if (forceReload) url.searchParams.set("_control_reload", String(Date.now()));
+    return url.toString();
+  }
+
+  function openProject(project: Project, host: Host = PRIMARY_HOST, forceReload = false) {
     const projectWindow = window.open(
-      getUrl(PRIMARY_HOST, project.port),
+      projectUrl(project, host, forceReload),
       projectWindowName(project.id),
     );
     if (!projectWindow) {
       notify("error", "Open blocked", "Allow popups for Control Module and try again.");
       return null;
     }
-    projectWindows.current[project.id] = projectWindow;
+    projectWindows.current[project.id] = { window: projectWindow, host };
     projectWindow.focus();
     return projectWindow;
   }
 
   async function refreshProjectAfterRestart(project: Project) {
-    const projectUrl = getUrl(PRIMARY_HOST, project.port);
+    let nativeResult: BrowserTabResult | null = null;
     try {
-      await fetch(projectUrl, { cache: "reload", mode: "no-cors" });
+      nativeResult = await apiRequest<BrowserTabResult>("/api/projects/browser-tabs", {
+        method: "POST",
+        body: JSON.stringify({ id: project.id, action: "refresh" }),
+      });
+      if (nativeResult.matched > 0) {
+        return {
+          tabWasOpen: true,
+          tabReloaded: nativeResult.refreshed > 0,
+          tabCount: nativeResult.matched,
+          browserNames: nativeResult.browsers,
+          nativeTabManaged: true,
+          permissionDenied: nativeResult.permissionDenied,
+        };
+      }
     } catch {
-      // The host restart still succeeded; opening it remains available below.
+      // Older runners and browsers without macOS automation use the safe window fallback.
     }
 
-    const existingWindow = projectWindows.current[project.id];
-    if (existingWindow && !existingWindow.closed) {
-      const freshUrl = new URL(projectUrl);
-      freshUrl.searchParams.set("_control_reload", String(Date.now()));
+    const trackedWindow = projectWindows.current[project.id];
+    if (trackedWindow && !trackedWindow.window.closed) {
       try {
-        existingWindow.location.href = freshUrl.toString();
+        trackedWindow.window.location.href = projectUrl(project, trackedWindow.host, true);
+        return {
+          tabWasOpen: true,
+          tabReloaded: true,
+          tabCount: 1,
+          browserNames: [],
+          nativeTabManaged: false,
+          permissionDenied: nativeResult?.permissionDenied === true,
+        };
       } catch {
-        // Cross-origin restrictions can block controlling an existing tab.
+        return {
+          tabWasOpen: true,
+          tabReloaded: false,
+          tabCount: 1,
+          browserNames: [],
+          nativeTabManaged: false,
+          permissionDenied: nativeResult?.permissionDenied === true,
+        };
       }
     }
+    return {
+      tabWasOpen: false,
+      tabReloaded: false,
+      tabCount: 0,
+      browserNames: [],
+      nativeTabManaged: false,
+      permissionDenied: nativeResult?.permissionDenied === true,
+    };
   }
 
   function closeRestartPrompt() {
-    setRestartPromptProject(null);
+    if (restartPromptOpening) return;
+    setRestartPrompt(null);
     window.requestAnimationFrame(() => restartTriggerRef.current?.focus());
   }
 
-  function acceptRestartPrompt() {
-    if (!restartPromptProject) return;
-    const opened = openProject(restartPromptProject);
-    if (opened) setRestartPromptProject(null);
+  async function acceptRestartPrompt() {
+    if (!restartPrompt) return;
+    const { project, tabWasOpen, tabReloaded, nativeTabManaged } = restartPrompt;
+    setRestartPromptOpening(true);
+    if (nativeTabManaged) {
+      try {
+        const result = await apiRequest<BrowserTabResult>("/api/projects/browser-tabs", {
+          method: "POST",
+          body: JSON.stringify({ id: project.id, action: "focus" }),
+        });
+        if (result.focused > 0) {
+          setRestartPrompt(null);
+          return;
+        }
+      } catch {
+        // The project is still refreshed; the regular browser fallback remains available.
+      } finally {
+        setRestartPromptOpening(false);
+      }
+    }
+
+    const trackedWindow = projectWindows.current[project.id];
+    if (tabWasOpen && trackedWindow && !trackedWindow.window.closed) {
+      if (!tabReloaded) {
+        const opened = openProject(project, trackedWindow.host, true);
+        if (!opened) return;
+      } else {
+        trackedWindow.window.focus();
+      }
+      setRestartPrompt(null);
+      setRestartPromptOpening(false);
+      return;
+    }
+
+    const opened = openProject(project, PRIMARY_HOST, tabWasOpen && !tabReloaded);
+    if (opened) setRestartPrompt(null);
+    setRestartPromptOpening(false);
   }
 
   async function startProject(project: Project) {
@@ -2352,14 +2487,14 @@ export default function Home() {
       notify("error", "No command", "Add a command before starting this project.");
       return;
     }
-    if (!beginRateLimitedAction()) return;
+    if (!beginProjectRateLimitedAction(project.id)) return;
     setDismissedProjectErrors((current) => {
       if (!(project.id in current)) return current;
       const next = { ...current };
       delete next[project.id];
       return next;
     });
-    setBusyId(project.id);
+    setProjectBusy(project.id, true);
     setError("");
     try {
       const result = await apiRequest<{ project: Project }>("/api/projects/start", {
@@ -2379,13 +2514,13 @@ export default function Home() {
       setError(detail);
       notify("error", `Could not start ${project.name}`, detail);
     } finally {
-      setBusyId(null);
+      setProjectBusy(project.id, false);
     }
   }
 
   async function stopProject(project: Project) {
-    if (!beginRateLimitedAction()) return;
-    setBusyId(project.id);
+    if (!beginProjectRateLimitedAction(project.id)) return;
+    setProjectBusy(project.id, true);
     setError("");
     expectedStops.current.add(project.id);
     try {
@@ -2403,7 +2538,7 @@ export default function Home() {
       setError(detail);
       notify("error", `Could not stop ${project.name}`, detail);
     } finally {
-      setBusyId(null);
+      setProjectBusy(project.id, false);
     }
   }
 
@@ -2412,10 +2547,11 @@ export default function Home() {
       notify("info", "Project is stopped", `Start ${project.name} before restarting it.`);
       return;
     }
-    if (!beginRateLimitedAction()) return;
+    if (!beginProjectRateLimitedAction(project.id)) return;
     restartTriggerRef.current = trigger || null;
-    setRestartPromptProject(null);
-    setBusyId(project.id);
+    setRestartPrompt(null);
+    setRestartPromptOpening(false);
+    setProjectBusy(project.id, true);
     setRestartingIds((current) => ({ ...current, [project.id]: true }));
     setError("");
     expectedStops.current.add(project.id);
@@ -2430,8 +2566,8 @@ export default function Home() {
       if (!activeProject?.running) {
         throw new Error(activeProject?.lastLog || "The command exited during restart.");
       }
-      await refreshProjectAfterRestart(activeProject);
-      setRestartPromptProject(activeProject);
+      const tabState = await refreshProjectAfterRestart(activeProject);
+      setRestartPrompt({ project: activeProject, ...tabState });
     } catch (requestError) {
       const detail = getErrorMessage(requestError, "The command could not restart.");
       setError(detail);
@@ -2444,7 +2580,7 @@ export default function Home() {
         delete next[project.id];
         return next;
       });
-      setBusyId(null);
+      setProjectBusy(project.id, false);
     }
   }
 
@@ -2469,8 +2605,7 @@ export default function Home() {
     setProjects(nextProjects);
     setIsReorderingProjects(true);
     setProjectInfoId(null);
-    setDraggingProjectId(null);
-    setProjectDropTarget(null);
+    finishProjectDrag();
     try {
       await apiRequest("/api/projects/reorder", {
         method: "POST",
@@ -2490,7 +2625,12 @@ export default function Home() {
     if (!canReorderProjects) return;
     const currentIndex = projects.findIndex((item) => item.id === project.id);
     const target = projects[currentIndex + offset];
-    if (!target) return;
+    if (!target) {
+      setReorderAnnouncement(
+        `${project.name} is already ${offset < 0 ? "first" : "last"}.`,
+      );
+      return;
+    }
     const position = offset < 0 ? "before" : "after";
     const nextProjects = reorderProjectList(projects, project.id, target.id, position);
     if (!nextProjects) return;
@@ -2507,42 +2647,105 @@ export default function Home() {
     }
     event.dataTransfer.effectAllowed = "move";
     event.dataTransfer.setData("text/plain", project.id);
+    draggingProjectIdRef.current = project.id;
     setDraggingProjectId(project.id);
+    projectDropTargetRef.current = null;
     setProjectDropTarget(null);
     setProjectInfoId(null);
+
+    const projectRow = event.currentTarget.closest<HTMLElement>(".project-row");
+    if (projectRow) {
+      const preview = projectRow.cloneNode(true) as HTMLElement;
+      preview.className = "project-drag-preview";
+      preview.style.width = `${Math.min(projectRow.getBoundingClientRect().width, 520)}px`;
+      preview.querySelectorAll("button, a").forEach((element) => element.remove());
+      document.body.append(preview);
+      dragPreviewRef.current = preview;
+      event.dataTransfer.setDragImage(preview, 24, 22);
+    }
+    setReorderAnnouncement(`Picked up ${project.name}. Move to a marked position and release to place it.`);
   }
 
-  function handleProjectDragOver(event: ReactDragEvent<HTMLElement>, targetId: string) {
-    if (!canReorderProjects || !draggingProjectId || draggingProjectId === targetId) return;
+  function handleProjectListDragOver(event: ReactDragEvent<HTMLDivElement>) {
+    const sourceId = draggingProjectIdRef.current || event.dataTransfer.getData("text/plain");
+    if (!canReorderProjects || !sourceId) return;
     event.preventDefault();
     event.dataTransfer.dropEffect = "move";
-    const bounds = event.currentTarget.getBoundingClientRect();
-    const position = projectView === "cards"
+    const rows = Array.from(
+      event.currentTarget.querySelectorAll<HTMLElement>(".project-row"),
+    );
+    if (rows.length === 0) return;
+
+    const targetRow = projectView === "list"
+      ? rows.find((row) => {
+        const bounds = row.getBoundingClientRect();
+        return event.clientY < bounds.top + (bounds.height / 2);
+      }) || rows[rows.length - 1]
+      : rows.reduce((closest, row) => {
+        const closestBounds = closest.getBoundingClientRect();
+        const rowBounds = row.getBoundingClientRect();
+        const closestX = Math.max(closestBounds.left, Math.min(event.clientX, closestBounds.right));
+        const closestY = Math.max(closestBounds.top, Math.min(event.clientY, closestBounds.bottom));
+        const rowX = Math.max(rowBounds.left, Math.min(event.clientX, rowBounds.right));
+        const rowY = Math.max(rowBounds.top, Math.min(event.clientY, rowBounds.bottom));
+        const closestDistance = Math.hypot(event.clientX - closestX, event.clientY - closestY);
+        const rowDistance = Math.hypot(event.clientX - rowX, event.clientY - rowY);
+        return rowDistance < closestDistance ? row : closest;
+      });
+
+    const targetId = targetRow.dataset.projectId;
+    if (!targetId) return;
+    if (targetId === sourceId) {
+      projectDropTargetRef.current = null;
+      setProjectDropTarget(null);
+      return;
+    }
+    const bounds = targetRow.getBoundingClientRect();
+    const pointerInsideVerticalBounds = event.clientY >= bounds.top && event.clientY <= bounds.bottom;
+    const position = projectView === "cards" && pointerInsideVerticalBounds
       ? event.clientX < bounds.left + (bounds.width / 2) ? "before" : "after"
       : event.clientY < bounds.top + (bounds.height / 2) ? "before" : "after";
-    if (projectDropTarget?.id === targetId && projectDropTarget.position === position) return;
-    setProjectDropTarget({ id: targetId, position });
+    const currentTarget = projectDropTargetRef.current;
+    if (currentTarget?.id === targetId && currentTarget.position === position) return;
+    const nextTarget = { id: targetId, position } as const;
+    projectDropTargetRef.current = nextTarget;
+    setProjectDropTarget(nextTarget);
   }
 
-  function handleProjectDrop(event: ReactDragEvent<HTMLElement>, target: Project) {
+  function handleProjectListDrop(event: ReactDragEvent<HTMLDivElement>) {
     event.preventDefault();
     if (!canReorderProjects) return;
-    const sourceId = draggingProjectId || event.dataTransfer.getData("text/plain");
-    const position = projectDropTarget?.id === target.id
-      ? projectDropTarget.position
-      : "before";
+    const sourceId = draggingProjectIdRef.current || event.dataTransfer.getData("text/plain");
+    const targetState = projectDropTargetRef.current;
+    if (!targetState) {
+      finishProjectDrag();
+      return;
+    }
     const source = projects.find((project) => project.id === sourceId);
-    const nextProjects = reorderProjectList(projects, sourceId, target.id, position);
-    setDraggingProjectId(null);
-    setProjectDropTarget(null);
-    if (!source || !nextProjects) return;
+    const target = projects.find((project) => project.id === targetState.id);
+    const nextProjects = reorderProjectList(
+      projects,
+      sourceId,
+      targetState.id,
+      targetState.position,
+    );
+    finishProjectDrag();
+    if (!source || !target || !nextProjects) return;
+    if (nextProjects.every((project, index) => project.id === projects[index]?.id)) {
+      setReorderAnnouncement(`${source.name} stayed in the same position.`);
+      return;
+    }
     void persistProjectOrder(
       nextProjects,
-      `Moved ${source.name} ${position} ${target.name}.`,
+      `Moved ${source.name} ${targetState.position} ${target.name}.`,
     );
   }
 
   function finishProjectDrag() {
+    dragPreviewRef.current?.remove();
+    dragPreviewRef.current = null;
+    draggingProjectIdRef.current = null;
+    projectDropTargetRef.current = null;
     setDraggingProjectId(null);
     setProjectDropTarget(null);
   }
@@ -2760,7 +2963,7 @@ export default function Home() {
 
   async function removeProject(project: Project) {
     if (!beginRateLimitedAction()) return;
-    setBusyId(project.id);
+    setProjectBusy(project.id, true);
     try {
       await apiRequest("/api/projects/delete", {
         method: "POST",
@@ -2775,7 +2978,7 @@ export default function Home() {
       setError(detail);
       notify("error", "Delete failed", detail);
     } finally {
-      setBusyId(null);
+      setProjectBusy(project.id, false);
     }
   }
 
@@ -2953,6 +3156,34 @@ export default function Home() {
           </div>
         </div>
 
+        <div className={`field project-published-field${editingProjectIsRunning ? " form-field-locked" : ""}`}>
+          <div className="field-label-row">
+            <label htmlFor={`${editingId ? "edit" : "add"}-project-public-url`}>Published site</label>
+            <span className="optional-field-label">Optional</span>
+          </div>
+          <input
+            id={`${editingId ? "edit" : "add"}-project-public-url`}
+            type="url"
+            value={publicUrl}
+            onChange={(event) => {
+              setPublicUrl(event.target.value);
+              setError("");
+            }}
+            placeholder="https://example.com"
+            maxLength={2048}
+            autoComplete="url"
+            spellCheck={false}
+            disabled={editingProjectIsRunning}
+            aria-invalid={Boolean(publishedSiteError)}
+            aria-describedby={publishedSiteError ? "published-site-error" : undefined}
+          />
+          {publishedSiteError && (
+            <span className="field-error" id="published-site-error" role="status">
+              {publishedSiteError}
+            </span>
+          )}
+        </div>
+
         {!editingId && (
           <div className="project-setup-row">
             <div className="project-setup-copy">
@@ -3108,25 +3339,17 @@ export default function Home() {
                 </div>
               )}
             </div>
-            <div className="process-command-tabs" role="tablist" aria-label="Process command">
-              {(Object.keys(processCommands) as ProcessCommandKind[]).map((kind) => (
-                <button
-                  key={kind}
-                  className={activeProcessCommand === kind ? "active" : ""}
-                  type="button"
-                  role="tab"
-                  aria-selected={activeProcessCommand === kind}
-                  aria-controls="process-command-panel"
-                  onClick={() => setActiveProcessCommand(kind)}
-                >
-                  {processCommands[kind].label}
-                  {processCommands[kind].value.trim() && (
-                    <span className="process-command-set" aria-label="configured" />
-                  )}
-                </button>
-              ))}
-            </div>
-            <div className="process-command-panel" id="process-command-panel" role="tabpanel">
+            <ProcessCommandTabs
+              active={activeProcessCommand}
+              commands={processCommands}
+              onChange={setActiveProcessCommand}
+            />
+            <div
+              className="process-command-panel"
+              id="process-command-panel"
+              role="tabpanel"
+              aria-labelledby={`process-command-tab-${activeProcessCommand}`}
+            >
               <div className="process-command-label">
                 <label htmlFor={`${editingId ? "edit" : "add"}-${activeProcessCommand}-command`}>
                   {activeCommand.label} command
@@ -3247,35 +3470,7 @@ export default function Home() {
 
   return (
     <main className="app-shell">
-      {toasts.length > 0 && (
-        <div
-          className="toast-region"
-          aria-label="Notifications"
-          aria-live="polite"
-          aria-relevant="additions removals"
-        >
-          {toasts.map((toast) => (
-            <section
-              className={`toast toast-${toast.kind}`}
-              key={toast.id}
-              role={toast.kind === "error" ? "alert" : "status"}
-            >
-              <span className="toast-icon" aria-hidden="true">
-                {toast.kind === "success" ? "✓" : toast.kind === "error" ? "!" : "i"}
-              </span>
-              <div className="toast-copy">
-                <strong>{toast.title}</strong>
-                <p>{toast.description}</p>
-              </div>
-              {toast.kind === "error" ? (
-                <button type="button" onClick={() => dismissToast(toast.id)} aria-label="Dismiss notification">×</button>
-              ) : (
-                <span className="toast-timer" aria-hidden="true" />
-              )}
-            </section>
-          ))}
-        </div>
-      )}
+      <ToastRegion toasts={toasts} onDismiss={dismissToast} />
 
       <header className="app-header">
         <h1>Control Module</h1>
@@ -3339,7 +3534,7 @@ export default function Home() {
                   className="button run-all-button"
                   type="button"
                   onClick={() => void runAllProjects()}
-                  disabled={!runnerOnline || startableCount === 0 || isStartingAll || isStoppingAll || actionCooldownActive || Boolean(editingId)}
+                  disabled={!runnerOnline || startableCount === 0 || isStartingAll || isStoppingAll || hasBusyProjects || actionCooldownActive || Boolean(editingId)}
                   aria-label={isStartingAll ? "Starting projects" : "Run all projects"}
                   title={editingId
                     ? "Finish editing before starting projects"
@@ -3353,7 +3548,7 @@ export default function Home() {
                   className="button stop-all-button"
                   type="button"
                   onClick={() => setStopAllOpen(true)}
-                  disabled={!runnerOnline || stoppableCount === 0 || isStartingAll || isStoppingAll || actionCooldownActive}
+                  disabled={!runnerOnline || stoppableCount === 0 || isStartingAll || isStoppingAll || hasBusyProjects || actionCooldownActive}
                   aria-label="Stop all projects"
                   title={stoppableCount === 0
                     ? "No projects are running"
@@ -3374,13 +3569,23 @@ export default function Home() {
               }}
               aria-expanded={transferMenuOpen}
               aria-haspopup="menu"
+              aria-controls="app-actions-menu"
               aria-label="More app actions"
             >
               <span className="action-icon ellipsis-vertical-icon" aria-hidden="true" />
               More
             </button>
             {transferMenuOpen && (
-              <div className="transfer-popover" role="menu" aria-label="App options">
+              <div
+                className="transfer-popover"
+                id="app-actions-menu"
+                role="menu"
+                aria-label="App options"
+                onKeyDown={(event) => handleMenuKeyDown(event, () => {
+                  setTransferMenuOpen(false);
+                  transferMenuRef.current?.querySelector<HTMLButtonElement>(".transfer-button")?.focus();
+                })}
+              >
                 <button
                   type="button"
                   role="menuitem"
@@ -3595,7 +3800,7 @@ export default function Home() {
                 className="button run-all-button"
                 type="button"
                 onClick={() => void runAllProjects()}
-                disabled={!runnerOnline || startableCount === 0 || isStartingAll || isStoppingAll || actionCooldownActive}
+                disabled={!runnerOnline || startableCount === 0 || isStartingAll || isStoppingAll || hasBusyProjects || actionCooldownActive}
                 aria-label={isStartingAll ? "Starting selected projects" : "Run selected projects"}
                 title={selectedCount === 0
                   ? "Select at least one project"
@@ -3609,7 +3814,7 @@ export default function Home() {
                 className="button stop-all-button"
                 type="button"
                 onClick={() => setStopAllOpen(true)}
-                disabled={!runnerOnline || stoppableCount === 0 || isStartingAll || isStoppingAll || actionCooldownActive}
+                disabled={!runnerOnline || stoppableCount === 0 || isStartingAll || isStoppingAll || hasBusyProjects || actionCooldownActive}
                 aria-label="Stop selected projects"
                 title={selectedCount === 0
                   ? "Select at least one project"
@@ -3646,14 +3851,22 @@ export default function Home() {
         ) : (
           <>
           <p className="sr-only" role="status" aria-live="polite">{reorderAnnouncement}</p>
-          <div className={`project-list ${projectView === "cards" ? "card-view" : "list-view"}`}>
+          <div
+            className={`project-list ${projectView === "cards" ? "card-view" : "list-view"}${draggingProjectId ? " is-project-dragging" : ""}`}
+            onDragOver={handleProjectListDragOver}
+            onDrop={handleProjectListDrop}
+          >
             {filteredProjects.map((project) => {
               const url = getUrl(PRIMARY_HOST, project.port);
               const localhostUrl = getUrl("localhost", project.port);
               const isRestarting = Boolean(restartingIds[project.id]);
-              const isBusy = busyId === project.id || isRestarting;
+              const isBusy = Boolean(busyProjectIds[project.id]) || isRestarting;
+              const projectCooldownActive = Boolean(projectCooldownIds[project.id]);
               const isSelected = Boolean(selectedProjectIds[project.id]);
               const commandVisible = Boolean(visibleCommands[project.id]);
+              const publishedUrl = project.publicUrl && !publishedUrlError(project.publicUrl)
+                ? project.publicUrl
+                : "";
               const addedDetails = getAddedDetails(project.createdAt);
               const projectErrorVisible = Boolean(
                 !project.running
@@ -3667,8 +3880,8 @@ export default function Home() {
                 <article
                   className={`project-row ${project.running ? "is-running" : "is-stopped"}${selectionMode ? " selecting" : ""}${isSelected ? " selected" : ""}${draggingProjectId === project.id ? " is-dragging" : ""}${dropClass}`}
                   key={project.id}
-                  onDragOver={(event) => handleProjectDragOver(event, project.id)}
-                  onDrop={(event) => handleProjectDrop(event, project)}
+                  data-project-id={project.id}
+                  data-drop-position={projectDropTarget?.id === project.id ? projectDropTarget.position : undefined}
                 >
                   <div className="project-main">
                     <div className="project-header-row">
@@ -3729,13 +3942,20 @@ export default function Home() {
                               id={`project-menu-${project.id}`}
                               role="menu"
                               aria-label={`${project.name} options`}
+                              onKeyDown={(event) => handleMenuKeyDown(event, () => {
+                                setProjectInfoId(null);
+                                event.currentTarget
+                                  .closest("[data-project-info]")
+                                  ?.querySelector<HTMLButtonElement>(".project-info-button")
+                                  ?.focus();
+                              })}
                             >
                               <div className="project-menu-submenu">
                                 <button
                                   className="project-menu-item"
                                   type="button"
                                   role="menuitem"
-                                  aria-haspopup="dialog"
+                                  aria-describedby={`project-added-${project.id}`}
                                 >
                                   <span className="action-icon calendar-clock-icon" aria-hidden="true" />
                                   Date added
@@ -3743,8 +3963,8 @@ export default function Home() {
                                 </button>
                                 <div
                                   className="project-date-popover"
-                                  role="dialog"
-                                  aria-label={`${project.name} added date`}
+                                  id={`project-added-${project.id}`}
+                                  role="tooltip"
                                 >
                                   <strong>Added</strong>
                                   <dl>
@@ -3779,23 +3999,55 @@ export default function Home() {
                       </div>
                       </div>
                       {!selectionMode && (
-                        <div
-                          className="project-quick-actions"
-                          role="group"
-                          aria-label={`${project.name} quick actions`}
-                        >
-                        <button
-                          className="project-open-link project-edit-link"
-                          type="button"
-                          onClick={() => editProject(project)}
-                          disabled={isBusy || isStartingAll || isStoppingAll}
-                          aria-label={`Edit ${project.name}`}
-                          title={project.running ? "Rename project; stop it to edit Port or Command" : "Edit project"}
-                        >
-                          <span className="action-icon edit-icon" aria-hidden="true" />
-                          <span className="project-quick-action-label">Edit project</span>
-                        </button>
-                        {project.running ? (
+                        <div className="project-header-actions">
+                          <div
+                            className="project-runtime-actions"
+                            role="group"
+                            aria-label={`${project.name} runtime controls`}
+                          >
+                            <button
+                              className={`button project-action-toggle ${project.running ? "stop" : "start"}`}
+                              type="button"
+                              onClick={() => project.running ? stopProject(project) : startProject(project)}
+                              disabled={isBusy || isStartingAll || isStoppingAll || projectCooldownActive}
+                            >
+                              {isBusy ? "Wait…" : project.running ? "Stop" : "Start"}
+                            </button>
+                            <button
+                              className="button project-action-restart"
+                              type="button"
+                              onClick={(event) => restartProject(project, event.currentTarget)}
+                              disabled={!project.running || isBusy || isStartingAll || isStoppingAll || projectCooldownActive}
+                              title={project.running ? `Restart ${project.name}` : "Start the project before restarting it"}
+                              aria-label={`Restart ${project.name}`}
+                              aria-busy={isRestarting}
+                            >
+                              <span
+                                className={`action-icon ${isRestarting ? "restart-loader-icon" : "restart-icon"}`}
+                                aria-hidden="true"
+                              />
+                              <span className="project-action-label">
+                                {isRestarting ? "Restarting…" : "Restart"}
+                              </span>
+                            </button>
+                          </div>
+                          <div
+                            className="project-quick-actions"
+                            role="group"
+                            aria-label={`${project.name} project actions`}
+                          >
+                            <button
+                              className="project-open-link project-edit-link"
+                              type="button"
+                              onClick={() => editProject(project)}
+                              disabled={isBusy || isStartingAll || isStoppingAll}
+                              aria-label={`Edit ${project.name}`}
+                              title={project.running ? "Rename project; stop it to edit Port, Published site, or Command" : "Edit project"}
+                            >
+                              <span className="action-icon edit-icon" aria-hidden="true" />
+                              <span className="project-quick-action-label">Edit project</span>
+                            </button>
+                            {project.running ? (
                           <button
                             className="project-open-link project-open-action"
                             type="button"
@@ -3806,7 +4058,7 @@ export default function Home() {
                             <span className="action-icon external-link-icon" aria-hidden="true" />
                             <span className="project-quick-action-label">Open link</span>
                           </button>
-                        ) : (
+                            ) : (
                           <button
                             className="project-open-link project-open-action disabled"
                             type="button"
@@ -3817,19 +4069,55 @@ export default function Home() {
                             <span className="action-icon external-link-icon" aria-hidden="true" />
                             <span className="project-quick-action-label">Start to open</span>
                           </button>
-                        )}
+                            )}
+                          </div>
                         </div>
                       )}
                     </div>
                     <div className="project-url">
                       {project.running ? (
                         <>
-                          <a href={localhostUrl} target="_blank" rel="noreferrer">localhost:{project.port}</a>
+                          <a
+                            href={localhostUrl}
+                            target="_blank"
+                            rel="noreferrer"
+                            onClick={(event) => {
+                              event.preventDefault();
+                              openProject(project, "localhost");
+                            }}
+                          >
+                            localhost:{project.port}
+                          </a>
                           <span aria-hidden="true">&amp;</span>
-                          <a href={url} target="_blank" rel="noreferrer">127.0.0.1:{project.port}</a>
+                          <a
+                            href={url}
+                            target="_blank"
+                            rel="noreferrer"
+                            onClick={(event) => {
+                              event.preventDefault();
+                              openProject(project);
+                            }}
+                          >
+                            127.0.0.1:{project.port}
+                          </a>
                         </>
                       ) : (
                         <span>{getLocalAddressLabel(project.port)}</span>
+                      )}
+                      {publishedUrl && (
+                        <>
+                          <span className="project-url-separator" aria-hidden="true">·</span>
+                          <a
+                            className="project-published-url"
+                            href={publishedUrl}
+                            target="_blank"
+                            rel="noreferrer"
+                            title={publishedUrl}
+                          >
+                            Published site
+                            <span className="action-icon external-link-icon" aria-hidden="true" />
+                          </a>
+                        </>
                       )}
                     </div>
                     {!selectionMode && (
@@ -3880,33 +4168,7 @@ export default function Home() {
                               : "No command"}
                           </code>
                         </div>
-                      </div>
-
-                          <div className="project-actions">
-                            <div className="project-runtime-actions">
-                          <button
-                            className={`button project-action-toggle ${project.running ? "stop" : "start"}`}
-                            type="button"
-                            onClick={() => project.running ? stopProject(project) : startProject(project)}
-                            disabled={isBusy || isStartingAll || isStoppingAll || actionCooldownActive}
-                          >
-                            {isBusy ? "Wait…" : project.running ? "Stop" : "Start"}
-                          </button>
-                          <button
-                            className="button project-action-restart"
-                            type="button"
-                            onClick={(event) => restartProject(project, event.currentTarget)}
-                            disabled={!project.running || isBusy || isStartingAll || isStoppingAll || actionCooldownActive}
-                            title={project.running ? `Restart ${project.name}` : "Start the project before restarting it"}
-                            aria-busy={isRestarting}
-                          >
-                            {isRestarting && (
-                              <span className="action-icon restart-loader-icon" aria-hidden="true" />
-                            )}
-                            {isRestarting ? "Restarting…" : "Restart"}
-                          </button>
-                            </div>
-                          </div>
+                        </div>
                         </div>
                         {projectErrorVisible && (
                           <div className="project-error" role="status" aria-label={`${project.name} project error`}>
@@ -4133,7 +4395,7 @@ export default function Home() {
         </div>
       )}
 
-      {restartPromptProject && (
+      {restartPrompt && (
         <div
           className="modal-backdrop"
           onMouseDown={(event) => {
@@ -4147,20 +4409,74 @@ export default function Home() {
             aria-labelledby="restart-open-title"
             aria-describedby="restart-open-description"
           >
-            <h2 id="restart-open-title">Restart complete</h2>
-            <p id="restart-open-description">
-              {restartPromptProject.name} is running again and its page was refreshed.
-              {" "}Do you want to go to the website?
-            </p>
-            <code className="restart-open-address">
-              {getLocalAddressLabel(restartPromptProject.port)}
-            </code>
+            <div className="restart-open-heading">
+              <span className="restart-open-symbol" aria-hidden="true">
+                <span className="action-icon restart-icon" />
+              </span>
+              <div>
+                <span>Restart complete</span>
+                <h2 id="restart-open-title">{restartPrompt.project.name}</h2>
+              </div>
+            </div>
+            <div className="restart-open-content">
+              <p id="restart-open-description">
+                {restartPrompt.tabWasOpen
+                  ? `The host is running again and ${restartPrompt.tabCount === 1 ? "an open project tab was" : `${restartPrompt.tabCount} open project tabs were`} detected.`
+                  : "The host is running again. Open the project now?"}
+              </p>
+              <div
+                className={`restart-tab-state ${restartPrompt.tabWasOpen ? "tab-found" : restartPrompt.permissionDenied ? "permission-needed" : "tab-not-found"}`}
+              >
+                <span className="restart-tab-state-dot" aria-hidden="true" />
+                <div>
+                  <strong>
+                    {restartPrompt.tabWasOpen
+                      ? restartPrompt.tabReloaded
+                        ? restartPrompt.tabCount === 1 ? "Open tab refreshed" : `${restartPrompt.tabCount} open tabs refreshed`
+                        : restartPrompt.tabCount === 1 ? "Open tab found" : `${restartPrompt.tabCount} open tabs found`
+                      : restartPrompt.permissionDenied ? "Browser access is off" : "No open project tab"}
+                  </strong>
+                  <span>
+                    {restartPrompt.tabWasOpen
+                      ? restartPrompt.nativeTabManaged
+                        ? `Matched ${browserNamesLabel(restartPrompt.browserNames)} by port and kept each tab's current page, including nested routes.`
+                        : restartPrompt.tabReloaded
+                          ? "The tracked tab received a fresh reload. Switch to it to review the restarted host."
+                          : "The browser kept the tab open but blocked its automatic reload."
+                      : restartPrompt.permissionDenied
+                        ? "Allow Control Module under System Settings → Privacy & Security → Automation to detect existing local tabs."
+                        : "The local site is ready whenever you want to check it."}
+                  </span>
+                </div>
+              </div>
+              <code className="restart-open-address">
+                {getLocalAddressLabel(restartPrompt.project.port)}
+              </code>
+            </div>
             <div className="modal-actions">
-              <button className="button" type="button" onClick={closeRestartPrompt} autoFocus>
-                Deny
+              <button
+                className="button"
+                type="button"
+                onClick={closeRestartPrompt}
+                disabled={restartPromptOpening}
+                autoFocus
+              >
+                Stay here
               </button>
-              <button className="button open" type="button" onClick={acceptRestartPrompt}>
-                Accept
+              <button
+                className="button open"
+                type="button"
+                onClick={() => void acceptRestartPrompt()}
+                disabled={restartPromptOpening}
+                aria-busy={restartPromptOpening}
+              >
+                {restartPromptOpening
+                  ? "Opening…"
+                  : restartPrompt.nativeTabManaged
+                    ? "Go to browser"
+                    : restartPrompt.tabWasOpen
+                      ? restartPrompt.tabReloaded ? "Go to refreshed tab" : "Refresh and view tab"
+                      : "Open website"}
               </button>
             </div>
           </section>
@@ -4619,7 +4935,7 @@ export default function Home() {
             <form
               onSubmit={(event) => {
                 event.preventDefault();
-                if (deleteNameMatches && busyId !== projectToDelete.id) {
+                if (deleteNameMatches && !busyProjectIds[projectToDelete.id]) {
                   void removeProject(projectToDelete);
                 }
               }}
@@ -4647,9 +4963,9 @@ export default function Home() {
                 <button
                   className="button delete-confirm"
                   type="submit"
-                  disabled={!deleteNameMatches || busyId === projectToDelete.id || actionCooldownActive}
+                  disabled={!deleteNameMatches || Boolean(busyProjectIds[projectToDelete.id]) || actionCooldownActive}
                 >
-                  {busyId === projectToDelete.id ? "Deleting…" : "Delete"}
+                  {busyProjectIds[projectToDelete.id] ? "Deleting…" : "Delete"}
                 </button>
               </div>
             </form>

@@ -38,5 +38,7 @@
   <string>Copyright © 2026 Mitchell Moscoso</string>
   <key>NSDesktopFolderUsageDescription</key>
   <string>Desktop access is optional and is requested only when you enable it in Setup or start a project stored on Desktop.</string>
+  <key>NSAppleEventsUsageDescription</key>
+  <string>Control Module checks only local project tab addresses so it can refresh or focus them after you restart a host.</string>
 </dict>
 </plist>

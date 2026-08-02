@@ -33,6 +33,7 @@ class ControlServerTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
         self.previous_project_folder_root = control_server.PROJECT_FOLDER_ROOT
+        self.previous_browser_tab_script = control_server.BROWSER_TAB_SCRIPT
         control_server.PROJECT_FOLDER_ROOT = self.root
         control_server.DATA_DIR = self.root / "data"
         control_server.PROJECTS_FILE = control_server.DATA_DIR / "projects.json"
@@ -51,6 +52,7 @@ class ControlServerTests(unittest.TestCase):
     def tearDown(self) -> None:
         control_server.stop_all_processes()
         control_server.PROJECT_FOLDER_ROOT = self.previous_project_folder_root
+        control_server.BROWSER_TAB_SCRIPT = self.previous_browser_tab_script
         self.temporary.cleanup()
 
     def test_first_run_is_empty_and_private(self) -> None:
@@ -89,6 +91,92 @@ class ControlServerTests(unittest.TestCase):
                 "first-project,second-project,third-project",
             )
 
+    def test_action_rate_limit_is_scoped_to_each_project(self) -> None:
+        with mock.patch.object(control_server.time, "monotonic", return_value=100.0):
+            control_server.enforce_action_rate_limit(["first-project"])
+            control_server.enforce_action_rate_limit(["second-project"])
+
+            with self.assertRaisesRegex(control_server.RateLimitError, "one second"):
+                control_server.enforce_action_rate_limit(["first-project"])
+
+        self.assertEqual(control_server.LAST_ACTIONS["first-project"], 100.0)
+        self.assertEqual(control_server.LAST_ACTIONS["second-project"], 100.0)
+
+    def test_browser_tab_refresh_uses_only_the_saved_project_port(self) -> None:
+        control_server.write_projects([{
+            "id": "local-site",
+            "name": "Local site",
+            "host": "127.0.0.1",
+            "port": 4321,
+            "command": "python3 -m http.server 4321",
+            "createdAt": 1,
+            "updatedAt": 1,
+        }])
+        control_server.BROWSER_TAB_SCRIPT = self.root / "browser_tabs.jxa"
+        control_server.BROWSER_TAB_SCRIPT.write_text("function run() {}\n", encoding="utf-8")
+        completed = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout=json.dumps({
+                "available": True,
+                "matched": 2,
+                "refreshed": 2,
+                "focused": 0,
+                "permissionDenied": False,
+                "browsers": ["Safari", "Chrome"],
+            }),
+            stderr="",
+        )
+
+        with (
+            mock.patch.object(control_server.sys, "platform", "darwin"),
+            mock.patch.object(control_server.subprocess, "run", return_value=completed) as run,
+        ):
+            result = control_server.project_browser_tabs("local-site", "refresh")
+
+        self.assertEqual(result["matched"], 2)
+        self.assertEqual(result["refreshed"], 2)
+        self.assertEqual(result["browsers"], ["Safari", "Chrome"])
+        self.assertEqual(
+            run.call_args.args[0],
+            [
+                "/usr/bin/osascript",
+                "-l",
+                "JavaScript",
+                str(control_server.BROWSER_TAB_SCRIPT),
+                "4321",
+                "refresh",
+            ],
+        )
+
+    def test_browser_tab_refresh_reports_denied_automation_without_failing_restart(self) -> None:
+        control_server.write_projects([{
+            "id": "local-site",
+            "name": "Local site",
+            "host": "localhost",
+            "port": 4321,
+            "command": "python3 -m http.server 4321",
+            "createdAt": 1,
+            "updatedAt": 1,
+        }])
+        control_server.BROWSER_TAB_SCRIPT = self.root / "browser_tabs.jxa"
+        control_server.BROWSER_TAB_SCRIPT.write_text("function run() {}\n", encoding="utf-8")
+        denied = subprocess.CompletedProcess(
+            args=[],
+            returncode=1,
+            stdout="",
+            stderr="Not authorized to send Apple events. (-1743)",
+        )
+
+        with (
+            mock.patch.object(control_server.sys, "platform", "darwin"),
+            mock.patch.object(control_server.subprocess, "run", return_value=denied),
+        ):
+            result = control_server.project_browser_tabs("local-site", "refresh")
+
+        self.assertFalse(result["available"])
+        self.assertTrue(result["permissionDenied"])
+
     def test_corrupt_data_is_preserved_and_reported(self) -> None:
         control_server.ensure_private_directory(control_server.PROJECTS_FILE.parent)
         control_server.PROJECTS_FILE.write_text("not-json", encoding="utf-8")
@@ -98,6 +186,75 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(len(backups), 1)
         self.assertEqual(backups[0].read_text(encoding="utf-8"), "not-json")
         self.assertEqual(private_mode(backups[0]), 0o600)
+
+    def test_saved_projects_are_schema_checked(self) -> None:
+        project = {
+            "id": "saved-project",
+            "name": "Saved project",
+            "host": "127.0.0.1",
+            "port": 4321,
+            "command": "python3 -m http.server 4321",
+            "createdAt": 1,
+            "updatedAt": 1,
+        }
+        control_server.write_projects([project])
+        saved = control_server.read_projects()
+        self.assertEqual(saved[0]["id"], "saved-project")
+        self.assertEqual(saved[0]["publicUrl"], "")
+
+        control_server.write_projects([project, {**project, "name": "Duplicate"}])
+        with self.assertRaisesRegex(control_server.ProjectDataError, "left unchanged"):
+            control_server.read_projects()
+
+    def test_listener_ownership_uses_one_lsof_snapshot(self) -> None:
+        completed = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout="p111\nn127.0.0.1:4321\np222\nn*:4322\n",
+            stderr="",
+        )
+        with (
+            mock.patch.object(control_server.subprocess, "run", return_value=completed) as run,
+            mock.patch.object(control_server.os, "getpgid", side_effect=lambda pid: pid + 1000),
+        ):
+            owners = control_server.listener_process_groups_by_port({4321, 4322})
+
+        self.assertEqual(owners, {4321: {1111}, 4322: {1222}})
+        run.assert_called_once()
+
+    def test_project_views_share_listener_ownership_snapshot(self) -> None:
+        projects = [
+            {"id": "one", "name": "One", "host": "127.0.0.1", "port": 4321},
+            {"id": "two", "name": "Two", "host": "127.0.0.1", "port": 4322},
+        ]
+        control_server.PROCESSES.update({
+            "one": mock.Mock(pid=111),
+            "two": mock.Mock(pid=222),
+        })
+        with (
+            mock.patch.object(control_server, "process_is_running", return_value=True),
+            mock.patch.object(control_server, "port_is_open", return_value=True),
+            mock.patch.object(
+                control_server,
+                "listener_process_groups_by_port",
+                return_value={4321: {111}, 4322: {222}},
+            ) as listener_snapshot,
+        ):
+            views = control_server.project_views(projects)
+
+        self.assertTrue(all(project["running"] for project in views))
+        listener_snapshot.assert_called_once_with({4321, 4322})
+
+    def test_log_summary_redacts_common_secrets(self) -> None:
+        control_server.ensure_private_directory(control_server.LOG_DIR)
+        control_server.log_path("private-output").write_text(
+            "TOKEN=hidden-value Authorization: Bearer another-secret\n",
+            encoding="utf-8",
+        )
+        summary = control_server.last_log_line("private-output")
+        self.assertNotIn("hidden-value", summary)
+        self.assertNotIn("another-secret", summary)
+        self.assertIn("[redacted]", summary)
 
     def test_session_token_is_private_and_stable(self) -> None:
         first = control_server.ensure_session_token()
@@ -330,6 +487,7 @@ class ControlServerTests(unittest.TestCase):
             "name": "Custom process",
             "host": "127.0.0.1",
             "port": 4327,
+            "publicUrl": "https://example.com/project",
             "command": "PORT=4327 npm run start",
             "setupCommand": "npm install",
             "stopCommand": "npm run stop",
@@ -339,6 +497,7 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(validated["setupCommand"], "npm install")
         self.assertEqual(validated["stopCommand"], "npm run stop")
         self.assertEqual(validated["restartCommand"], "PORT=4327 npm run restart")
+        self.assertEqual(validated["publicUrl"], "https://example.com/project")
         with self.assertRaisesRegex(ValueError, "setup command"):
             control_server.validate_project({
                 **validated,
@@ -349,7 +508,18 @@ class ControlServerTests(unittest.TestCase):
                 **validated,
                 "restartCommand": "PORT=9998 npm run restart",
             })
+        with self.assertRaisesRegex(ValueError, "must use http"):
+            control_server.validate_project({
+                **validated,
+                "publicUrl": "ftp://example.com/project",
+            })
+        with self.assertRaisesRegex(ValueError, "username or password"):
+            control_server.validate_project({
+                **validated,
+                "publicUrl": "https://user:secret@example.com/project",
+            })
 
+    @unittest.skipUnless(Path("/bin/zsh").is_file(), "project hooks require macOS zsh")
     def test_optional_project_hook_is_logged_and_checked(self) -> None:
         project = {
             "id": "hook-project",
@@ -362,6 +532,25 @@ class ControlServerTests(unittest.TestCase):
         project["setupCommand"] = "exit 7"
         with self.assertRaisesRegex(ValueError, "status 7"):
             control_server.run_project_hook(project, "setupCommand", "Setup", timeout=2)
+
+    def test_project_hook_closes_log_when_process_cannot_launch(self) -> None:
+        log_context = mock.MagicMock()
+        log_file = mock.MagicMock()
+        log_context.__enter__.return_value = log_file
+        project = {"id": "failed-hook", "setupCommand": "exit 0"}
+
+        with (
+            mock.patch.object(control_server, "open_private_log", return_value=log_context),
+            mock.patch.object(
+                control_server.subprocess,
+                "Popen",
+                side_effect=FileNotFoundError("shell not found"),
+            ),
+            self.assertRaisesRegex(FileNotFoundError, "shell not found"),
+        ):
+            control_server.run_project_hook(project, "setupCommand", "Setup", timeout=2)
+
+        log_context.__exit__.assert_called_once()
 
     def test_project_inspection_rejects_relative_or_missing_paths(self) -> None:
         with self.assertRaisesRegex(ValueError, "full project folder path"):
@@ -540,7 +729,9 @@ class ControlServerTests(unittest.TestCase):
                 probe.bind(("127.0.0.1", 0))
             except PermissionError:
                 self.skipTest("the current sandbox does not permit local listener tests")
-            port = probe.getsockname()[1]
+        port = control_server.find_available_port("127.0.0.1", 8999)
+        if port is None:
+            self.skipTest("no valid project port is available for the listener test")
         command = [sys.executable, "-m", "http.server", str(port), "--bind", "127.0.0.1"]
         process = subprocess.Popen(
             command,
@@ -550,9 +741,16 @@ class ControlServerTests(unittest.TestCase):
         )
         control_server.PROCESSES["owned-test"] = process
         deadline = time.monotonic() + 5
-        while time.monotonic() < deadline and not control_server.port_is_open("127.0.0.1", port):
+        owned_listener_ready = False
+        while time.monotonic() < deadline:
+            if (
+                control_server.port_is_open("127.0.0.1", port)
+                and control_server.port_is_owned_by_process_group(port, process.pid)
+            ):
+                owned_listener_ready = True
+                break
             time.sleep(0.05)
-        self.assertTrue(control_server.port_is_owned_by_process_group(port, process.pid))
+        self.assertTrue(owned_listener_ready)
         self.assertTrue(control_server.stop_process("owned-test"))
         self.assertTrue(control_server.wait_for_port_to_close("127.0.0.1", port, timeout=3))
 

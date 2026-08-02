@@ -4,6 +4,9 @@ import { type NextRequest, NextResponse } from "next/server";
 import { securityHeadersForRunner } from "./lib/security-headers";
 
 const SESSION_TOKEN_PATTERN = /^[A-Za-z0-9_-]{32,128}$/;
+const MAX_REQUEST_BODY_BYTES = 16 * 1024;
+
+class RequestBodyError extends Error {}
 
 function configuredWebPort() {
   const candidate = Number(process.env.CONTROL_MODULE_WEB_PORT);
@@ -56,6 +59,36 @@ function jsonError(message: string, status: number, runnerPort: number) {
   return applySecurityHeaders(response, runnerPort);
 }
 
+async function limitedRequestBody(request: NextRequest): Promise<ArrayBuffer | undefined> {
+  const declaredLength = request.headers.get("content-length");
+  if (declaredLength && (!/^\d+$/.test(declaredLength) || Number(declaredLength) > MAX_REQUEST_BODY_BYTES)) {
+    throw new RequestBodyError("The request is too large.");
+  }
+  if (!request.body) return undefined;
+
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > MAX_REQUEST_BODY_BYTES) {
+      await reader.cancel();
+      throw new RequestBodyError("The request is too large.");
+    }
+    chunks.push(value);
+  }
+
+  const body = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    body.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return body.buffer as ArrayBuffer;
+}
+
 async function forwardRunnerRequest(request: NextRequest, runnerPort: number, origin: string) {
   const token = await sessionToken();
   if (!token) return jsonError("The local command runner is not ready.", 503, runnerPort);
@@ -68,10 +101,17 @@ async function forwardRunnerRequest(request: NextRequest, runnerPort: number, or
   const contentType = request.headers.get("content-type");
   if (contentType) headers.set("Content-Type", contentType);
 
+  let body: ArrayBuffer | undefined;
   try {
-    const body = request.method === "GET" || request.method === "HEAD"
+    body = request.method === "GET" || request.method === "HEAD"
       ? undefined
-      : await request.arrayBuffer();
+      : await limitedRequestBody(request);
+  } catch (error) {
+    if (error instanceof RequestBodyError) return jsonError(error.message, 413, runnerPort);
+    return jsonError("The local command runner is offline.", 503, runnerPort);
+  }
+
+  try {
     const upstream = await fetch(
       `http://127.0.0.1:${runnerPort}${request.nextUrl.pathname}${request.nextUrl.search}`,
       {

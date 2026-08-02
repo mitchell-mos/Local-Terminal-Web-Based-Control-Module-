@@ -514,11 +514,32 @@ textarea:focus-visible {
   grid-column: 2;
 }
 
+.project-form > .project-published-field,
 .project-form > .project-setup-row,
 .project-form > .basic-project-fields,
 .project-form > .command-form-field,
 .project-form > .project-form-footer {
   grid-column: 1 / -1;
+}
+
+.optional-field-label {
+  color: var(--faint);
+  font-size: 10px;
+  font-weight: 550;
+}
+
+.project-published-field input {
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Monaco, Consolas, monospace;
+  font-size: 11px;
+}
+
+.field-error {
+  display: block;
+  margin-top: 6px;
+  color: var(--error);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.4;
 }
 
 .project-setup-row {
@@ -1709,6 +1730,29 @@ textarea:focus-visible {
   gap: 4px;
 }
 
+.project-list.card-view .project-header-actions,
+.project-list.card-view .project-runtime-actions {
+  gap: 4px;
+}
+
+.project-list.card-view .project-runtime-actions {
+  padding-right: 4px;
+}
+
+.project-list.card-view .project-action-toggle {
+  min-width: 56px;
+}
+
+.project-list.card-view .project-action-restart {
+  width: 34px;
+  min-width: 34px;
+  padding: 0;
+}
+
+.project-list.card-view .project-action-label {
+  display: none;
+}
+
 .project-list.card-view .project-open-link {
   width: 34px;
   min-width: 34px;
@@ -1727,31 +1771,20 @@ textarea:focus-visible {
 }
 
 .project-row {
+  content-visibility: auto;
+  contain-intrinsic-block-size: 220px;
   position: relative;
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   align-items: center;
   padding: 18px 0;
   border-bottom: 1px solid var(--border);
-  transition: background-color 180ms ease-out, border-color 140ms ease-out, opacity 140ms ease-out;
-}
-
-.project-row::before {
-  position: absolute;
-  top: 12px;
-  bottom: 12px;
-  left: 0;
-  width: 1px;
-  background: var(--border-strong);
-  content: "";
-}
-
-.project-row.is-running::before {
-  background: var(--success);
+  transition: background-color 180ms ease-out, border-color 140ms ease-out, box-shadow 180ms ease-out, opacity 140ms ease-out, transform 180ms cubic-bezier(.16, 1, .3, 1);
 }
 
 .project-row.is-dragging {
-  opacity: .42;
+  opacity: .24;
+  transform: scale(.985);
 }
 
 .project-list.list-view .project-row.drag-over-before::after,
@@ -1760,40 +1793,60 @@ textarea:focus-visible {
   right: 0;
   left: 0;
   z-index: 3;
-  height: 2px;
-  border-radius: 1px;
-  background: var(--success);
-  content: "";
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 20px;
+  border-top: 2px solid var(--success);
+  background: var(--bg);
+  color: var(--success);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
   pointer-events: none;
 }
 
 .project-list.list-view .project-row.drag-over-before::after {
-  top: -1px;
+  top: -11px;
+  content: "Drop before";
 }
 
 .project-list.list-view .project-row.drag-over-after::after {
-  bottom: -1px;
+  bottom: -11px;
+  content: "Drop after";
 }
 
 .project-list.card-view .project-row.drag-over-before::after,
 .project-list.card-view .project-row.drag-over-after::after {
   position: absolute;
   top: 8px;
-  bottom: 8px;
   z-index: 3;
-  width: 2px;
-  border-radius: 1px;
-  background: var(--success);
-  content: "";
+  min-height: 24px;
+  padding: 0 7px;
+  border: 1px solid var(--success);
+  border-radius: 4px;
+  background: var(--success-bg);
+  color: var(--success);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 22px;
   pointer-events: none;
 }
 
 .project-list.card-view .project-row.drag-over-before::after {
-  left: -8px;
+  left: 8px;
+  content: "Drop before";
 }
 
 .project-list.card-view .project-row.drag-over-after::after {
-  right: -8px;
+  right: 8px;
+  content: "Drop after";
+}
+
+.project-list.card-view .project-row.drag-over-before,
+.project-list.card-view .project-row.drag-over-after {
+  border-color: var(--success);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, .18);
 }
 
 .project-row.selecting {
@@ -1837,19 +1890,20 @@ textarea:focus-visible {
   display: grid;
   flex: 0 0 auto;
   place-items: center;
-  width: 22px;
-  height: 28px;
+  width: 28px;
+  height: 30px;
   padding: 0;
   border: 0;
   border-radius: 4px;
   background: transparent;
   color: var(--muted);
   cursor: grab;
-  opacity: .4;
+  opacity: .58;
   transition: background-color 140ms ease-out, color 140ms ease-out, opacity 140ms ease-out;
 }
 
 .project-row:hover .project-drag-handle,
+.project-list.is-project-dragging .project-drag-handle,
 .project-drag-handle:focus-visible {
   color: var(--text);
   opacity: 1;
@@ -1862,6 +1916,8 @@ textarea:focus-visible {
 
 .project-drag-handle:active {
   cursor: grabbing;
+  background: var(--input);
+  color: var(--text);
 }
 
 .project-drag-handle[aria-disabled="true"] {
@@ -1901,9 +1957,32 @@ textarea:focus-visible {
 
 .project-list.list-view .project-row {
   padding-right: 8px;
-  padding-left: 8px;
+  padding-left: 6px;
   border-bottom-color: var(--border-strong);
   transition: background-color 180ms ease-out;
+}
+
+.project-drag-preview {
+  position: fixed;
+  top: -10000px;
+  left: -10000px;
+  z-index: 999;
+  max-height: 104px;
+  overflow: hidden;
+  padding: 14px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 14px 34px rgba(0, 0, 0, .34);
+  transform: rotate(.35deg);
+}
+
+.project-drag-preview .project-command-layout,
+.project-drag-preview .project-error,
+.project-drag-preview .project-header-actions,
+.project-drag-preview .project-menu {
+  display: none;
 }
 
 .project-list.list-view .project-row:hover,
@@ -2020,6 +2099,19 @@ textarea:focus-visible {
   gap: 6px;
   width: auto;
   margin: 0;
+}
+
+.project-header-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  min-width: 0;
+}
+
+.project-header-actions .project-runtime-actions {
+  padding-right: 10px;
+  border-right: 1px solid var(--border);
 }
 
 .project-quick-actions .project-open-link {
@@ -2178,6 +2270,23 @@ textarea:focus-visible {
 .project-url > a:hover {
   color: var(--text);
   text-decoration: underline;
+}
+
+.project-url-separator {
+  margin: 0 2px;
+  color: var(--faint);
+}
+
+.project-url > .project-published-url {
+  gap: 4px;
+  color: var(--open-hover);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
+  font-weight: 650;
+}
+
+.project-published-url .action-icon {
+  width: 12px;
+  height: 12px;
 }
 
 .project-command {
@@ -2348,13 +2457,6 @@ textarea:focus-visible {
   color: var(--error);
 }
 
-.project-actions {
-  display: flex;
-  align-items: center;
-  justify-content: flex-start;
-  width: 100%;
-}
-
 .project-runtime-actions {
   display: flex;
   align-items: center;
@@ -2368,6 +2470,10 @@ textarea:focus-visible {
   height: 34px;
 }
 
+.project-action-toggle {
+  font-weight: 650;
+}
+
 .project-action-restart:disabled {
   cursor: not-allowed;
 }
@@ -2377,6 +2483,13 @@ textarea:focus-visible {
   border-color: transparent;
   background: transparent;
   color: var(--muted);
+}
+
+.restart-icon {
+  width: 16px;
+  height: 16px;
+  -webkit-mask-image: url("/icons/restart-loader.svg");
+  mask-image: url("/icons/restart-loader.svg");
 }
 
 .project-action-restart:hover:not(:disabled) {
@@ -3093,9 +3206,108 @@ textarea:focus-visible {
   line-height: 1.5;
 }
 
+.restart-open-modal {
+  width: min(440px, 100%);
+  padding: 0;
+  overflow: hidden;
+}
+
+.restart-open-heading {
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  padding: 20px 20px 0;
+}
+
+.restart-open-heading > div {
+  min-width: 0;
+}
+
+.restart-open-heading > div > span {
+  display: block;
+  margin-bottom: 2px;
+  color: var(--success);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.restart-open-heading h2 {
+  font-size: 18px;
+}
+
+.restart-open-symbol {
+  display: grid;
+  width: 38px;
+  height: 38px;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, var(--success) 34%, var(--border));
+  border-radius: 50%;
+  background: var(--success-bg);
+  color: var(--success);
+}
+
+.restart-open-symbol .restart-icon {
+  width: 19px;
+  height: 19px;
+}
+
+.restart-open-content {
+  padding: 0 20px 18px;
+}
+
+.restart-open-content > p {
+  margin-top: 14px;
+}
+
+.restart-tab-state {
+  display: grid;
+  grid-template-columns: 7px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  margin-top: 16px;
+  padding: 12px 0;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+
+.restart-tab-state-dot {
+  width: 7px;
+  height: 7px;
+  margin-top: 4px;
+  border-radius: 50%;
+  background: var(--faint);
+}
+
+.restart-tab-state.tab-found .restart-tab-state-dot {
+  background: var(--success);
+}
+
+.restart-tab-state.permission-needed .restart-tab-state-dot {
+  background: var(--error);
+}
+
+.restart-tab-state strong,
+.restart-tab-state span {
+  display: block;
+}
+
+.restart-tab-state strong {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.restart-tab-state div > span {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
 .restart-open-address {
   display: block;
-  margin-top: 12px;
+  margin-top: 14px;
   padding: 9px 10px;
   overflow-wrap: anywhere;
   border: 1px solid var(--border);
@@ -3105,6 +3317,13 @@ textarea:focus-visible {
   font-size: 11px;
   line-height: 1.45;
   white-space: normal;
+}
+
+.restart-open-modal .modal-actions {
+  margin-top: 0;
+  padding: 14px 20px;
+  border-top: 1px solid var(--border);
+  background: var(--input);
 }
 
 .delete-confirmation-field {
@@ -3289,6 +3508,25 @@ textarea:focus-visible {
   }
 }
 
+@media (forced-colors: active) {
+  button,
+  a,
+  input,
+  select,
+  textarea,
+  .project-row,
+  .toast,
+  .project-status {
+    forced-color-adjust: auto;
+  }
+
+  .project-status.running::before,
+  .process-command-set,
+  .project-select-button.selected {
+    background: Highlight;
+  }
+}
+
 @keyframes running-blink {
   0%, 100% {
     opacity: 1;
@@ -3339,6 +3577,7 @@ textarea:focus-visible {
   .project-form > .project-name-field,
   .project-form > .editing-name-field,
   .project-form > .address-fields,
+  .project-form > .project-published-field,
   .project-form > .project-setup-row,
   .project-form > .basic-project-fields,
   .project-form > .command-form-field,

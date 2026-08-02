@@ -18,6 +18,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 
 HOST = "127.0.0.1"
@@ -52,10 +53,13 @@ LOG_BACKUP_COUNT = 3
 REQUEST_TIMEOUT_SECONDS = 10.0
 MAX_REQUEST_THREADS = 24
 MAX_REQUEST_BODY_BYTES = 16 * 1024
+MAX_PROJECTS_FILE_BYTES = 2 * 1024 * 1024
+MAX_SAVED_PROJECTS = 100
 MAX_PROJECT_PATH_LENGTH = 4096
 MAX_PACKAGE_JSON_BYTES = 1024 * 1024
 MAX_PROJECT_COMMAND_LENGTH = 4096
 MAX_OPTIONAL_COMMAND_LENGTH = 2048
+MAX_PUBLIC_URL_LENGTH = 2048
 PROJECT_HOOK_TIMEOUT_SECONDS = 60.0
 PROJECT_STOP_HOOK_TIMEOUT_SECONDS = 10.0
 
@@ -87,6 +91,7 @@ def configured_web_port() -> int:
 
 WEB_PORT = configured_web_port()
 PROJECT_DIR = Path(__file__).resolve().parents[1]
+BROWSER_TAB_SCRIPT = PROJECT_DIR / "server" / "browser_tabs.jxa"
 DEFAULT_DATA_DIR = PROJECT_DIR / ".control-module-data"
 DATA_DIR = Path(os.environ.get("CONTROL_MODULE_DATA_DIR", DEFAULT_DATA_DIR)).expanduser().resolve()
 PROJECTS_FILE = DATA_DIR / "projects.json"
@@ -274,6 +279,91 @@ def choose_project_folder() -> dict[str, Any]:
         return {"cancelled": True}
     directory = validate_project_directory(selected)
     return {"cancelled": False, "path": str(directory)}
+
+
+def project_browser_tabs(project_id: str, action: str) -> dict[str, Any]:
+    """Find, refresh, or focus browser tabs for one saved local project."""
+    if not ID_PATTERN.fullmatch(project_id):
+        raise ValueError("The project ID is invalid.")
+    if action not in {"detect", "refresh", "focus"}:
+        raise ValueError("The browser tab action is invalid.")
+    with LOCK:
+        project = next(
+            (item for item in read_projects() if item.get("id") == project_id),
+            None,
+        )
+    if project is None:
+        raise ValueError("That project could not be found.")
+    port = int(project["port"])
+    empty_result = {
+        "available": False,
+        "matched": 0,
+        "refreshed": 0,
+        "focused": 0,
+        "permissionDenied": False,
+        "browsers": [],
+    }
+    if sys.platform != "darwin" or not BROWSER_TAB_SCRIPT.is_file():
+        return empty_result
+
+    enforce_action_rate_limit([f"browser-tab:{project_id}:{action}"])
+    try:
+        completed = subprocess.run(
+            [
+                "/usr/bin/osascript",
+                "-l",
+                "JavaScript",
+                str(BROWSER_TAB_SCRIPT),
+                str(port),
+                action,
+            ],
+            check=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return empty_result
+
+    combined_error = f"{completed.stdout}\n{completed.stderr}"
+    if completed.returncode != 0:
+        return {
+            **empty_result,
+            "permissionDenied": bool(
+                "-1743" in combined_error
+                or re.search(r"not authorized|not permitted", combined_error, re.IGNORECASE)
+            ),
+        }
+    try:
+        payload = json.loads(completed.stdout.strip())
+    except (json.JSONDecodeError, TypeError):
+        return empty_result
+    if not isinstance(payload, dict):
+        return empty_result
+
+    browsers = payload.get("browsers", [])
+    safe_browsers = [
+        str(name)[:40]
+        for name in browsers
+        if isinstance(name, str) and name.strip()
+    ][:6] if isinstance(browsers, list) else []
+
+    def safe_count(name: str) -> int:
+        try:
+            return max(0, min(int(payload.get(name, 0)), 100))
+        except (TypeError, ValueError):
+            return 0
+
+    return {
+        "available": payload.get("available") is True,
+        "matched": safe_count("matched"),
+        "refreshed": safe_count("refreshed"),
+        "focused": safe_count("focused"),
+        "permissionDenied": payload.get("permissionDenied") is True,
+        "browsers": safe_browsers,
+    }
 
 
 def validate_project_directory(raw_path: Any) -> Path:
@@ -641,11 +731,39 @@ def read_projects() -> list[dict[str, Any]]:
             return projects
         try:
             PROJECTS_FILE.chmod(0o600)
-            data = json.loads(PROJECTS_FILE.read_text(encoding="utf-8"))
+            raw_data = PROJECTS_FILE.read_bytes()
+            if len(raw_data) > MAX_PROJECTS_FILE_BYTES:
+                raise ValueError("The saved project file is too large.")
+            data = json.loads(raw_data)
             if not isinstance(data, list):
-                raise json.JSONDecodeError("Project data must be a list", "", 0)
-            return data
-        except (OSError, json.JSONDecodeError) as error:
+                raise ValueError("Saved projects must be a list.")
+            if len(data) > MAX_SAVED_PROJECTS:
+                raise ValueError(f"Save no more than {MAX_SAVED_PROJECTS} projects.")
+
+            projects: list[dict[str, Any]] = []
+            seen_ids: set[str] = set()
+            seen_ports: set[int] = set()
+            for index, project in enumerate(data, start=1):
+                if not isinstance(project, dict):
+                    raise ValueError(f"Saved project {index} must be an object.")
+                validated = validate_project(project)
+                created_at = project.get("createdAt")
+                updated_at = project.get("updatedAt")
+                if type(created_at) is not int or created_at < 0:
+                    raise ValueError(f"Saved project {index} has an invalid creation date.")
+                if type(updated_at) is not int or updated_at < created_at:
+                    raise ValueError(f"Saved project {index} has an invalid update date.")
+                project_id = str(validated["id"])
+                port = int(validated["port"])
+                if project_id in seen_ids:
+                    raise ValueError(f"Saved project {index} duplicates project ID {project_id}.")
+                if port in seen_ports:
+                    raise ValueError(f"Saved project {index} duplicates port {port}.")
+                seen_ids.add(project_id)
+                seen_ports.add(port)
+                projects.append({**validated, "createdAt": created_at, "updatedAt": updated_at})
+            return projects
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
             backup = preserve_corrupt_projects()
             backup_note = f" A private backup was saved as {backup.name}." if backup else ""
             raise ProjectDataError(
@@ -679,6 +797,7 @@ def validate_project(payload: dict[str, Any]) -> dict[str, Any]:
     project_id = str(payload.get("id", "")).strip()
     name = str(payload.get("name", "")).strip()
     host = str(payload.get("host", "")).strip()
+    public_url = str(payload.get("publicUrl", "")).strip()
     command = str(payload.get("command", "")).strip()
     setup_command = str(payload.get("setupCommand", "")).strip()
     stop_command = str(payload.get("stopCommand", "")).strip()
@@ -695,6 +814,23 @@ def validate_project(payload: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("Project names must be between 1 and 48 characters.")
     if host not in {"localhost", "127.0.0.1"}:
         raise ValueError("Choose localhost or 127.0.0.1.")
+    if len(public_url) > MAX_PUBLIC_URL_LENGTH:
+        raise ValueError(
+            f"Keep the published-site address under {MAX_PUBLIC_URL_LENGTH:,} characters."
+        )
+    if public_url:
+        try:
+            parsed_public_url = urlsplit(public_url)
+        except ValueError as error:
+            raise ValueError("Enter a complete published-site address.") from error
+        if parsed_public_url.scheme not in {"http", "https"}:
+            raise ValueError("The published site must use http:// or https://.")
+        if not parsed_public_url.hostname:
+            raise ValueError("Enter a complete published-site address.")
+        if parsed_public_url.username or parsed_public_url.password:
+            raise ValueError(
+                "The published-site address cannot contain a username or password."
+            )
     restriction = project_port_restriction_reason(port)
     if restriction:
         raise ValueError(restriction)
@@ -721,6 +857,7 @@ def validate_project(payload: dict[str, Any]) -> dict[str, Any]:
         "name": name,
         "host": host,
         "port": port,
+        "publicUrl": public_url,
         "command": command,
         "setupCommand": setup_command,
         "stopCommand": stop_command,
@@ -766,9 +903,17 @@ def wait_for_port_to_close(host: str, port: int, timeout: float = 2.0) -> bool:
 
 def listener_process_groups(port: int) -> set[int]:
     """Return process groups for listeners without ever signaling those listeners directly."""
+    return listener_process_groups_by_port({port}).get(port, set())
+
+
+def listener_process_groups_by_port(ports: set[int]) -> dict[int, set[int]]:
+    """Read all requested listener owners from one lsof snapshot."""
+    targets = {port for port in ports if MIN_PROJECT_PORT <= port <= MAX_PROJECT_PORT}
+    if not targets:
+        return {}
     try:
         result = subprocess.run(
-            ["/usr/sbin/lsof", "-nP", "-t", f"-iTCP:{port}", "-sTCP:LISTEN"],
+            ["/usr/sbin/lsof", "-nP", "-Fpn", "-iTCP", "-sTCP:LISTEN"],
             check=False,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
@@ -776,16 +921,25 @@ def listener_process_groups(port: int) -> set[int]:
             timeout=1,
         )
     except (OSError, subprocess.TimeoutExpired):
-        return set()
-    groups: set[int] = set()
+        return {}
+    groups_by_port: dict[int, set[int]] = {}
+    process_group: int | None = None
     for line in result.stdout.splitlines():
-        if not line.isdigit():
+        if line.startswith("p") and line[1:].isdigit():
+            try:
+                process_group = os.getpgid(int(line[1:]))
+            except (OSError, ProcessLookupError):
+                process_group = None
             continue
-        try:
-            groups.add(os.getpgid(int(line)))
-        except (OSError, ProcessLookupError):
+        if not line.startswith("n") or process_group is None:
             continue
-    return groups
+        match = re.search(r":(\d+)$", line[1:].split("->", 1)[0])
+        if not match:
+            continue
+        port = int(match.group(1))
+        if port in targets:
+            groups_by_port.setdefault(port, set()).add(process_group)
+    return groups_by_port
 
 
 def port_is_owned_by_process_group(port: int, process_group_id: int) -> bool:
@@ -973,7 +1127,20 @@ def last_log_line(project_id: str) -> str:
         return ""
     try:
         lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-        return lines[-1][-320:] if lines else ""
+        if not lines:
+            return ""
+        summary = lines[-1][-320:]
+        summary = re.sub(
+            r"(?i)\bAuthorization\s*([:=])\s*(?:Bearer\s+)?\S+",
+            r"Authorization\1[redacted]",
+            summary,
+        )
+        summary = re.sub(
+            r"(?i)\b(api[_-]?key|password|secret|token)\s*([:=])\s*\S+",
+            r"\1\2[redacted]",
+            summary,
+        )
+        return re.sub(r"(?i)\bBearer\s+\S+", "Bearer [redacted]", summary)
     except OSError:
         return ""
 
@@ -990,34 +1157,35 @@ def run_project_hook(
         return
 
     project_id = str(project["id"])
-    log_file = open_private_log(project_id)
-    log_file.write(
-        f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] {label} command started.\n".encode()
-    )
-    log_file.flush()
-    process = subprocess.Popen(
-        ["/bin/zsh", "-c", command],
-        cwd=PROJECT_DIR,
-        env=project_environment(),
-        stdout=log_file,
-        stderr=subprocess.STDOUT,
-        start_new_session=True,
-    )
-    try:
-        return_code = process.wait(timeout=timeout)
-    except subprocess.TimeoutExpired as error:
+    with open_private_log(project_id) as log_file:
+        log_file.write(
+            f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] {label} command started.\n".encode()
+        )
+        log_file.flush()
+        process = subprocess.Popen(
+            ["/bin/zsh", "-c", command],
+            cwd=PROJECT_DIR,
+            env=project_environment(),
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
         try:
-            os.killpg(process.pid, signal.SIGTERM)
-            process.wait(timeout=2)
-        except (ProcessLookupError, subprocess.TimeoutExpired):
+            return_code = process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired as error:
             try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            process.wait(timeout=2)
-        raise ValueError(f"The {label.lower()} command timed out after {int(timeout)} seconds.") from error
-    finally:
-        log_file.close()
+                os.killpg(process.pid, signal.SIGTERM)
+                process.wait(timeout=2)
+            except (ProcessLookupError, subprocess.TimeoutExpired):
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    # The process group may exit between the timeout and forced-stop attempt.
+                    pass
+                process.wait(timeout=2)
+            raise ValueError(
+                f"The {label.lower()} command timed out after {int(timeout)} seconds."
+            ) from error
 
     if return_code != 0:
         detail = last_log_line(project_id)
@@ -1027,15 +1195,21 @@ def run_project_hook(
         )
 
 
-def project_view(project: dict[str, Any]) -> dict[str, Any]:
+def project_view(
+    project: dict[str, Any],
+    listener_groups: dict[int, set[int]] | None = None,
+) -> dict[str, Any]:
     project_id = project["id"]
     process_alive = process_is_running(project_id)
     process = PROCESSES.get(project_id)
+    port = int(project["port"])
+    if listener_groups is None:
+        listener_groups = listener_process_groups_by_port({port})
     running = bool(
         process_alive
         and process
-        and port_is_open(str(project["host"]), int(project["port"]))
-        and port_is_owned_by_process_group(int(project["port"]), process.pid)
+        and port_is_open(str(project["host"]), port)
+        and process.pid in listener_groups.get(port, set())
     )
     if running:
         HEALTHY_PROJECTS.add(project_id)
@@ -1057,6 +1231,12 @@ def project_view(project: dict[str, Any]) -> dict[str, Any]:
             else {}
         ),
     }
+
+
+def project_views(projects: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    ports = {int(project["port"]) for project in projects}
+    listener_groups = listener_process_groups_by_port(ports)
+    return [project_view(project, listener_groups) for project in projects]
 
 
 def process_group_is_running(process_group_id: int) -> bool:
@@ -1259,7 +1439,7 @@ class ControlHandler(BaseHTTPRequestHandler):
                 return
             try:
                 with LOCK:
-                    self.send_json(200, {"projects": [project_view(item) for item in read_projects()]})
+                    self.send_json(200, {"projects": project_views(read_projects())})
             except ProjectDataError as error:
                 self.send_json(500, {"error": str(error)})
             return
@@ -1294,6 +1474,10 @@ class ControlHandler(BaseHTTPRequestHandler):
                 self.start_project(payload)
             elif self.path == "/api/projects/restart":
                 self.restart_project(payload)
+            elif self.path == "/api/projects/browser-tabs":
+                project_id = str(payload.get("id", "")).strip()
+                action = str(payload.get("action", "detect")).strip()
+                self.send_json(200, project_browser_tabs(project_id, action))
             elif self.path == "/api/projects/stop":
                 self.stop_project(payload)
             elif self.path == "/api/projects/stop-all":
@@ -1353,6 +1537,8 @@ class ControlHandler(BaseHTTPRequestHandler):
                 immutable_fields_changed = (
                     str(validated["host"]) != str(existing.get("host", ""))
                     or int(validated["port"]) != project_port(existing)
+                    or str(validated["publicUrl"]).strip()
+                    != str(existing.get("publicUrl", "")).strip()
                     or str(validated["command"]).strip()
                     != str(existing.get("command", "")).strip()
                     or str(validated["setupCommand"]).strip()
@@ -1365,12 +1551,13 @@ class ControlHandler(BaseHTTPRequestHandler):
                 if immutable_fields_changed:
                     raise ValueError(
                         "Only the project name can be edited while it is running. "
-                        "Stop it to change the port or process commands."
+                        "Stop it to change the port, published site, or process commands."
                     )
                 validated = {
                     **validated,
                     "host": str(existing.get("host", validated["host"])),
                     "port": int(existing.get("port", validated["port"])),
+                    "publicUrl": str(existing.get("publicUrl", "")),
                     "command": str(existing.get("command", validated["command"])),
                     "setupCommand": str(existing.get("setupCommand", "")),
                     "stopCommand": str(existing.get("stopCommand", "")),
@@ -1598,7 +1785,7 @@ class ControlHandler(BaseHTTPRequestHandler):
                 hook_errors.append(f"{project.get('name', project_id)}: {error}")
         with LOCK:
             stopped_ids, forced_ids, errors = stop_processes(managed_ids)
-            projects = [project_view(project) for project in read_projects()]
+            projects = project_views(read_projects())
         self.send_json(
             200,
             {

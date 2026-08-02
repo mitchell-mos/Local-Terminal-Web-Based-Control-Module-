@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Test and build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
+        with:
+          node-version: 24.17.0
+
+      - name: Enable the pinned package manager
+        run: corepack enable && corepack install
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Test
+        run: pnpm test
+
+      - name: Build
+        run: pnpm run build
+
+  macos:
+    name: Verify macOS launchers
+    runs-on: macos-14
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Check scripts and property lists
+        run: |
+          zsh -n ControlModule support/mac/*.sh
+          plutil -lint Setup.app/Contents/Info.plist Uninstall.app/Contents/Info.plist support/mac/App.plist
+
+      - name: Check ARM launchers
+        run: |
+          file Setup.app/Contents/MacOS/applet | grep -q arm64
+          file Uninstall.app/Contents/MacOS/applet | grep -q arm64
+
+      - name: Verify app signatures
+        run: |
+          codesign --verify --deep --strict Setup.app
+          codesign --verify --deep --strict Uninstall.app
+
+      - name: Run process-control tests
+        run: python3 -B -m unittest discover -s support/tests -p 'test_*.py'

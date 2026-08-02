@@ -4,6 +4,7 @@ import { execFile } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
+import { runInNewContext } from "node:vm";
 import test from "node:test";
 
 const root = new URL("../../", import.meta.url);
@@ -14,14 +15,16 @@ async function read(path) {
 }
 
 test("does not ship private user data or unrelated runtime state", async () => {
-  const [runner, launcher, page, packageJson, proxy] = await Promise.all([
+  const [runner, launcher, page, packageJson, proxy, restartIcon, browserTabs] = await Promise.all([
     read("server/control_server.py"),
     read("ControlModule"),
     read("app/page.tsx"),
     read("package.json"),
     read("proxy.ts"),
+    read("public/icons/restart-loader.svg"),
+    read("server/browser_tabs.jxa"),
   ]);
-  const publicSource = `${runner}\n${launcher}\n${page}\n${packageJson}\n${proxy}`;
+  const publicSource = `${runner}\n${launcher}\n${page}\n${packageJson}\n${proxy}\n${browserTabs}`;
 
   assert.doesNotMatch(publicSource, /\/Users\/[A-Za-z0-9._-]+/);
   assert.match(launcher, /local url="\$\{WEB_URL\}"/);
@@ -74,11 +77,56 @@ test("does not ship private user data or unrelated runtime state", async () => {
   assert.match(page, /\/api\/projects\/reorder/);
   assert.match(page, /draggable=\{canReorderProjects\}/);
   assert.match(page, /Dismiss \$\{project\.name\} error/);
+  assert.match(page, /control-module-project-filters-v1/);
+  assert.match(page, /window\.localStorage\.setItem\(PROJECT_FILTERS_KEY/);
+  assert.match(page, /Published site/);
+  assert.match(page, /projectDropTargetRef/);
+  assert.match(page, /setDragImage/);
+  assert.match(page, /beginProjectRateLimitedAction\(project\.id\)/);
+  assert.match(page, /projectCooldownIds/);
+  assert.match(page, /busyProjectIds/);
+  assert.match(page, /projectWindowName\(project\.id\)/);
+  assert.match(page, /tabWasOpen/);
+  assert.match(page, /tabReloaded/);
+  assert.match(page, /_control_reload/);
+  assert.match(page, /Go to refreshed tab/);
+  assert.match(page, /Go to browser/);
+  assert.match(page, /Open website/);
+  assert.doesNotMatch(page, />\s*Deny\s*</);
+  assert.doesNotMatch(page, />\s*Accept\s*</);
+  assert.match(restartIcon, /M9\.825 20\.7q-2\.575/);
+  assert.doesNotMatch(restartIcon, /transform=|stroke-width=/);
+  assert.match(runner, /\/api\/projects\/browser-tabs/);
+  assert.match(runner, /project_browser_tabs/);
+  assert.match(browserTabs, /http:\/\/127\.0\.0\.1:/);
+  assert.match(browserTabs, /http:\/\/localhost:/);
+  assert.match(browserTabs, /tab\.url\(\)/);
+  assert.match(browserTabs, /freshProjectUrl\(tabUrl\)/);
+  assert.match(browserTabs, /browserWindow\.currentTab = tab/);
+  assert.match(browserTabs, /browserWindow\.activeTabIndex = tabIndex \+ 1/);
   assert.match(proxy, /runtime", "session-token/);
   assert.match(proxy, /"X-Control-Token": token/);
   assert.match(proxy, /sec-fetch-site/);
+  assert.match(proxy, /MAX_REQUEST_BODY_BYTES/);
+  assert.match(proxy, /request\.body\.getReader\(\)/);
   assert.match(proxy, /Cross-site dashboard requests are not allowed/);
   assert.doesNotMatch(proxy, /instanceId|authorizationScheme/);
+});
+
+test("matches local browser tabs by port while preserving nested routes", async () => {
+  const source = await read("server/browser_tabs.jxa");
+  const context = { Date: { now: () => 123456 } };
+  runInNewContext(source, context);
+
+  assert.equal(context.isMatchingProjectUrl("http://localhost:4321/", 4321), true);
+  assert.equal(context.isMatchingProjectUrl("http://127.0.0.1:4321/about/team#staff", 4321), true);
+  assert.equal(context.isMatchingProjectUrl("https://localhost:4321/settings?tab=local", 4321), true);
+  assert.equal(context.isMatchingProjectUrl("http://localhost:43210/about", 4321), false);
+  assert.equal(context.isMatchingProjectUrl("https://example.com/?port=4321", 4321), false);
+  assert.equal(
+    context.freshProjectUrl("http://127.0.0.1:4321/about?tab=team#staff"),
+    "http://127.0.0.1:4321/about?tab=team&_control_reload=123456#staff",
+  );
 });
 
 test("publishes a consistent user-facing release version", async () => {
@@ -169,7 +217,7 @@ test("binds the dashboard to loopback and documents dangerous capabilities", asy
 
 test("contains the public trust files and no stale starter directories", async () => {
   const files = await readdir(root);
-  for (const expected of ["LICENSE", "README.md", "Setup.app", "Uninstall.app", ".github", "support", "server", "lib"]) {
+  for (const expected of ["CHANGELOG.md", "LICENSE", "README.md", "Setup.app", "Uninstall.app", ".github", "support", "server", "lib"]) {
     assert.ok(files.includes(expected), `${expected} should exist`);
   }
   for (const removed of ["Control Module Setup.app", "Install Control Module.command", "Uninstall Control Module.command", "docs", "packaging", "scripts", "tests", "db", "drizzle", "worker", "build", "package-lock.json", "postcss.config.mjs"]) {
@@ -177,11 +225,52 @@ test("contains the public trust files and no stale starter directories", async (
   }
 
   const docs = await readdir(new URL("support/docs/", root));
-  for (const expected of ["Runtime.md", "Notices.md"]) {
+  for (const expected of ["Architecture.md", "Security.md", "Troubleshooting.md", "Runtime.md", "Notices.md"]) {
     assert.ok(docs.includes(expected), `support/docs/${expected} should exist`);
   }
   await assert.doesNotReject(access(new URL(".github/SECURITY.md", root)));
   await assert.doesNotReject(access(new URL(".github/CONTRIBUTING.md", root)));
+});
+
+test("ships keyboard-complete reusable controls", async () => {
+  const [components, page, styles] = await Promise.all([
+    read("app/control-components.tsx"),
+    read("app/page.tsx"),
+    read("app/globals.css"),
+  ]);
+
+  assert.match(components, /tabIndex=\{active === kind \? 0 : -1\}/);
+  assert.match(components, /ArrowRight/);
+  assert.match(components, /ArrowLeft/);
+  assert.match(components, /aria-atomic="true"/);
+  assert.doesNotMatch(components, /aria-live=/);
+  assert.match(page, /handleMenuKeyDown/);
+  assert.match(page, /role="tooltip"/);
+  assert.match(page, /aria-labelledby=\{`process-command-tab-/);
+  assert.doesNotMatch(page, /fetch\(baseUrl/);
+  assert.match(styles, /forced-colors: active/);
+  assert.match(styles, /content-visibility: auto/);
+});
+
+test("pins reproducible builds and emits a compact standalone runtime", async () => {
+  const [packageJson, nextConfig, launcher, installer, releaseBuilder] = await Promise.all([
+    read("package.json"),
+    read("next.config.ts"),
+    read("ControlModule"),
+    read("support/mac/install.sh"),
+    read("support/mac/release.sh"),
+  ]);
+  const parsed = JSON.parse(packageJson);
+
+  assert.match(parsed.packageManager, /^pnpm@11\.9\.0\+sha512\./);
+  assert.match(nextConfig, /output: "standalone"/);
+  assert.match(launcher, /dist\/standalone\/server\.js/);
+  assert.match(installer, /SOURCE_DIR\/dist\/standalone/);
+  assert.doesNotMatch(installer, /ditto "\$SOURCE_DIR\/node_modules"/);
+  assert.match(installer, /prune_runtime/);
+  assert.match(releaseBuilder, /git archive --format=tar HEAD/);
+  assert.match(releaseBuilder, /codesign --verify --deep --strict/);
+  assert.match(releaseBuilder, /shasum -a 256/);
 });
 
 test("keeps local documentation links routed to existing files", async () => {
@@ -313,6 +402,12 @@ test("ships relocatable native setup and uninstall apps", async () => {
   assert.match(launcher, /instances\/\$INSTANCE_ID/);
   assert.match(launcher, /web_assets_ready/);
   assert.match(launcher, /stop_broken_owned_dashboard/);
+  assert.match(launcher, /select_available_runner_port/);
+  assert.match(launcher, /save_runner_port/);
+  assert.match(launcher, /stop_broken_owned_runner/);
+  assert.match(launcher, /RUNNER_PORT_CHANGED/);
+  assert.match(launcher, /selected dashboard port \$WEB_PORT/);
+  assert.doesNotMatch(launcher, /private runner port \$RUNNER_PORT is already being used/);
   assert.match(launcher, /\/assets\/index-/);
   assert.match(launcher, /uname -m/);
   assert.match(launcher, /Rosetta translation are not supported/);
@@ -370,6 +465,8 @@ test("ships relocatable native setup and uninstall apps", async () => {
   assert.match(builder, /codesign --force --deep --sign - "\$STAGING_APP"/);
   assert.match(builder, /xattr -d com\.apple\.FinderInfo "\$OUTPUT_APP"/);
   assert.match(builder, /codesign --verify --deep --strict "\$STAGING_APP"/);
+  assert.match(plist, /NSAppleEventsUsageDescription/);
+  assert.match(plist, /refresh or focus them after you restart a host/);
   assert.match(builder, /codesign --verify --deep "\$OUTPUT_APP"/);
   assert.match(setupBuilder, /osacompile/);
   assert.match(setupBuilder, /Setup\.app/);

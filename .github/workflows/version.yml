@@ -1,8 +1,6 @@
 name: Version policy
 
 on:
-  push:
-    branches: [ "main" ]
   pull_request:
     branches: [ "main" ]
 
@@ -14,29 +12,18 @@ jobs:
     name: Check version increment
     runs-on: ubuntu-latest
     steps:
+      - name: Accept automated dependency maintenance
+        if: github.event.pull_request.user.login == 'dependabot[bot]'
+        run: echo "Dependabot maintenance does not publish an app release."
+
       - name: Checkout repository
+        if: github.event.pull_request.user.login != 'dependabot[bot]'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
-      - name: Find version before push
-        id: previous
-        shell: bash
-        env:
-          BEFORE_PUSH: ${{ github.event.before }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          EVENT_NAME: ${{ github.event_name }}
-        run: |
-          set -euo pipefail
-          if [[ "$EVENT_NAME" == "pull_request" ]]; then
-            previous="$BASE_SHA"
-          else
-            previous="$BEFORE_PUSH"
-          fi
-          if [[ "$previous" =~ ^0+$ ]]; then
-            previous="$(git rev-parse HEAD^)"
-          fi
-          echo "ref=$previous" >> "$GITHUB_OUTPUT"
-
       - name: Check version increment
-        run: node support/version.mjs check "${{ steps.previous.outputs.ref }}"
+        if: github.event.pull_request.user.login != 'dependabot[bot]'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: node support/version.mjs check "$BASE_SHA"

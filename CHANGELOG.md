@@ -6,6 +6,10 @@ Notable user-facing changes are recorded here. Versions use `vMAJOR.UPDATE.FIX`.
 
 - No unreleased changes.
 
+## v1.02.1
+
+- Renamed the property-based fuzz suite to a JavaScript extension recognized by OpenSSF Scorecard while keeping it in the regular test run.
+
 ## v1.02.0
 
 - Added property-based fuzz tests for release metadata and version transitions.

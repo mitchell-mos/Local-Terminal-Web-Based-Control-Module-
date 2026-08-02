@@ -44,17 +44,25 @@ jobs:
       - name: Check scripts and property lists
         run: |
           zsh -n ControlModule support/mac/*.sh
-          plutil -lint Setup.app/Contents/Info.plist Uninstall.app/Contents/Info.plist support/mac/App.plist
+          plutil -lint support/mac/App.plist
+
+      - name: Build native launchers from source
+        run: |
+          mkdir -p "$RUNNER_TEMP/control-module-launchers"
+          support/mac/setup.sh "$RUNNER_TEMP/control-module-launchers/Setup.app"
+          support/mac/remove.sh "$RUNNER_TEMP/control-module-launchers/Uninstall.app"
 
       - name: Check ARM launchers
         run: |
-          file Setup.app/Contents/MacOS/applet | grep -q arm64
-          file Uninstall.app/Contents/MacOS/applet | grep -q arm64
+          plutil -lint "$RUNNER_TEMP/control-module-launchers/Setup.app/Contents/Info.plist"
+          plutil -lint "$RUNNER_TEMP/control-module-launchers/Uninstall.app/Contents/Info.plist"
+          file "$RUNNER_TEMP/control-module-launchers/Setup.app/Contents/MacOS/applet" | grep -q arm64
+          file "$RUNNER_TEMP/control-module-launchers/Uninstall.app/Contents/MacOS/applet" | grep -q arm64
 
       - name: Verify app signatures
         run: |
-          codesign --verify --deep --strict Setup.app
-          codesign --verify --deep --strict Uninstall.app
+          codesign --verify --deep --strict "$RUNNER_TEMP/control-module-launchers/Setup.app"
+          codesign --verify --deep --strict "$RUNNER_TEMP/control-module-launchers/Uninstall.app"
 
       - name: Run process-control tests
         run: python3 -B -m unittest discover -s support/tests -p 'test_*.py'

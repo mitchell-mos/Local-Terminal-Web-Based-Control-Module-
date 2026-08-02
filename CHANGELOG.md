@@ -6,6 +6,13 @@ Notable user-facing changes are recorded here. Versions use `vMAJOR.UPDATE.FIX`.
 
 - No unreleased changes.
 
+## v1.02.0
+
+- Added property-based fuzz tests for release metadata and version transitions.
+- Removed generated native executables from source control; CI and release packaging now rebuild and verify Setup and Uninstall from their reviewable sources.
+- Strengthened GitHub Actions token defaults, declared code ownership, and expanded the private vulnerability-reporting policy.
+- Added an ARM64 release workflow with checksums and GitHub build-provenance attestations, plus matching installation documentation.
+
 ## v1.01.2
 
 - Resolved CodeQL findings in URL-oriented test assertions, test-server initialization, and theme-state setup.

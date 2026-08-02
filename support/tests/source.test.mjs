@@ -219,8 +219,18 @@ test("binds the dashboard to loopback and documents dangerous capabilities", asy
 
 test("contains the public trust files and no stale starter directories", async () => {
   const files = await readdir(root);
-  for (const expected of ["CHANGELOG.md", "LICENSE", "README.md", "Setup.app", "Uninstall.app", ".github", "support", "server", "lib"]) {
+  const { stdout: trackedFiles } = await execFileAsync("git", ["ls-files"], {
+    cwd: root,
+    encoding: "utf8",
+  });
+  for (const expected of ["CHANGELOG.md", "LICENSE", "README.md", ".github", "support", "server", "lib"]) {
     assert.ok(files.includes(expected), `${expected} should exist`);
+  }
+  for (const generated of ["Setup.app", "Uninstall.app"]) {
+    assert.ok(
+      !trackedFiles.split("\n").some((path) => path.startsWith(`${generated}/`)),
+      `${generated} should be generated for releases, not committed`,
+    );
   }
   for (const removed of ["Control Module Setup.app", "Install Control Module.command", "Uninstall Control Module.command", "docs", "packaging", "scripts", "tests", "db", "drizzle", "worker", "build", "package-lock.json", "postcss.config.mjs"]) {
     assert.ok(!files.includes(removed), `${removed} should not be part of the public source tree`);
@@ -255,12 +265,13 @@ test("ships keyboard-complete reusable controls", async () => {
 });
 
 test("pins reproducible builds and emits a compact standalone runtime", async () => {
-  const [packageJson, nextConfig, launcher, installer, releaseBuilder] = await Promise.all([
+  const [packageJson, nextConfig, launcher, installer, releaseBuilder, releaseWorkflow] = await Promise.all([
     read("package.json"),
     read("next.config.ts"),
     read("ControlModule"),
     read("support/mac/install.sh"),
     read("support/mac/release.sh"),
+    read(".github/workflows/release.yml"),
   ]);
   const parsed = JSON.parse(packageJson);
 
@@ -273,6 +284,10 @@ test("pins reproducible builds and emits a compact standalone runtime", async ()
   assert.match(releaseBuilder, /git archive --format=tar HEAD/);
   assert.match(releaseBuilder, /codesign --verify --deep --strict/);
   assert.match(releaseBuilder, /shasum -a 256/);
+  assert.match(releaseBuilder, /ARCHIVE_NAME/);
+  assert.match(releaseWorkflow, /runs-on: macos-14/);
+  assert.match(releaseWorkflow, /attest-build-provenance@[a-f0-9]{40}/);
+  assert.match(releaseWorkflow, /gh release create/);
 });
 
 test("keeps local documentation links routed to existing files", async () => {
@@ -378,7 +393,7 @@ test("uninstall distinguishes a Finder copy with a duplicated instance marker", 
 });
 
 test("ships relocatable native setup and uninstall apps", async () => {
-  const [launcher, nativeLauncher, installer, uninstaller, builder, setupBuilder, setupSource, setupStore, removeBuilder, uninstallSource, iconBuilder, trashIcon, plist, readme] = await Promise.all([
+  const [launcher, nativeLauncher, installer, uninstaller, builder, setupBuilder, setupSource, setupStore, removeBuilder, uninstallSource, iconBuilder, trashIcon, plist, readme, ciWorkflow, releaseBuilder] = await Promise.all([
     read("ControlModule"),
     read("support/mac/Launch.applescript"),
     read("support/mac/install.sh"),
@@ -393,6 +408,8 @@ test("ships relocatable native setup and uninstall apps", async () => {
     read("support/mac/Trash.svg"),
     read("support/mac/App.plist"),
     read("README.md"),
+    read(".github/workflows/ci.yml"),
+    read("support/mac/release.sh"),
   ]);
 
   assert.match(launcher, /Library\/Application Support\/Control Module/);
@@ -477,6 +494,10 @@ test("ships relocatable native setup and uninstall apps", async () => {
   assert.match(setupBuilder, /xattr -d com\.apple\.FinderInfo "\$OUTPUT_APP"/);
   assert.match(setupBuilder, /codesign --verify --deep --strict "\$STAGING_APP"/);
   assert.match(setupBuilder, /codesign --verify --deep "\$OUTPUT_APP"/);
+  assert.match(ciWorkflow, /support\/mac\/setup\.sh/);
+  assert.match(ciWorkflow, /support\/mac\/remove\.sh/);
+  assert.match(releaseBuilder, /support\/mac\/setup\.sh/);
+  assert.match(releaseBuilder, /support\/mac\/remove\.sh/);
   assert.match(setupSource, /Dashboard port/);
   assert.match(setupSource, /--web-port/);
   assert.match(setupSource, /Desktop access/);

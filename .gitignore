@@ -22,6 +22,8 @@ __pycache__/
 /out/
 /release/
 /Control Module.app/
+/Setup.app/
+/Uninstall.app/
 /coverage/
 *.tsbuildinfo
 next-env.d.ts

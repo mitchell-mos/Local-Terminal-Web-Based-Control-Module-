@@ -15,7 +15,7 @@ Guided Setup downloads the official Node.js 24.17.0 ARM64 runtime directly from 
 
 ## Install
 
-Download or clone the project, keep `Setup.app` inside its Control Module folder, and double-click it. Setup lets you:
+Download the ARM64 archive from [GitHub Releases](https://github.com/mitchell-mos/Local-Terminal-Web-Based-Control-Module-/releases), keep `Setup.app` inside its extracted Control Module folder, and double-click it. Setup lets you:
 
 - select the dashboard port, with `1025` recommended;
 - use a private Application Support working copy or the downloaded checkout;
@@ -34,8 +34,19 @@ git clone <your-repository-url>
 cd control-module
 corepack pnpm install --frozen-lockfile
 corepack pnpm run build
+zsh support/mac/setup.sh
+zsh support/mac/remove.sh
 chmod +x ControlModule
 ./ControlModule
+```
+
+The native Setup and Uninstall apps are generated from the reviewable AppleScript and shell sources under `support/mac/`. Generated app bundles are release artifacts and are intentionally not committed to the source repository.
+
+Each packaged release includes a SHA-256 checksum and GitHub build-provenance attestation. You can verify them before opening Setup:
+
+```sh
+shasum -a 256 -c Control-Module-v1.02.0-macOS-arm64.zip.sha256
+gh attestation verify Control-Module-v1.02.0-macOS-arm64.zip --repo mitchell-mos/Local-Terminal-Web-Based-Control-Module-
 ```
 
 ## Projects
@@ -89,7 +100,7 @@ corepack pnpm audit
 
 Pull requests run the same test/build suite on Linux plus ARM launcher, plist, signing, and process-control checks on macOS. CodeQL, dependency review, Dependabot, and OpenSSF Scorecard cover security and dependency changes. See [CONTRIBUTING.md](.github/CONTRIBUTING.md).
 
-Maintainers can build a clean, checksum-stamped ARM64 archive after committing changes:
+Maintainers can build a clean, checksum-stamped ARM64 archive after committing changes. Pushing a matching version tag runs the same builder on GitHub's ARM64 macOS runner, publishes the archive and checksum, and records build provenance:
 
 ```sh
 support/mac/release.sh
@@ -113,7 +124,7 @@ corepack pnpm version:bump update
 corepack pnpm version:bump fix
 ```
 
-The version workflow verifies one valid transition against the pull request's base and again when it reaches `main`, avoiding unrelated contributor-branch conflicts. Changes are summarized in [CHANGELOG.md](CHANGELOG.md).
+The version workflow verifies one valid transition against the pull request's base. Automated dependency-maintenance pull requests do not publish unrelated app releases. Changes are summarized in [CHANGELOG.md](CHANGELOG.md).
 
 ## Disclaimer and intended use
 

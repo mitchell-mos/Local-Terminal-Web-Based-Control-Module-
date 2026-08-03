@@ -4,7 +4,7 @@ set -euo pipefail
 umask 077
 
 SCRIPT_DIR="${0:A:h}"
-CONFIG_ROOT="${CONTROL_MODULE_CONFIG_ROOT:-${CONTROL_MODULE_CONFIG_DIR:-$HOME/Library/Application Support/Control Module}}"
+CONFIG_ROOT="${CONTROL_MODULE_CONFIG_ROOT:-$HOME/Library/Application Support/Control Module}"
 SOURCE_DIR=""
 ACTION="status"
 INSTANCE_ID=""

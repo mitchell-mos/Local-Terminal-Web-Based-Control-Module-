@@ -493,6 +493,9 @@ test("ships relocatable native setup and uninstall apps", async () => {
   assert.match(uninstaller, /\.Trash/);
   assert.match(uninstaller, /Refusing to operate/);
   assert.match(manager, /status\|start\|stop\|restart/);
+  assert.doesNotMatch(manager, /CONFIG_ROOT=.*CONTROL_MODULE_CONFIG_DIR/);
+  assert.doesNotMatch(installer, /CONFIG_ROOT=.*CONTROL_MODULE_CONFIG_DIR/);
+  assert.doesNotMatch(uninstaller, /CONFIG_ROOT=.*CONTROL_MODULE_CONFIG_DIR/);
   assert.match(manager, /app_instance_id/);
   assert.match(manager, /listener_uses_instance/);
   assert.match(manager, /uninstall\.sh" --source "\$SOURCE_DIR" --stop-only/);
@@ -541,6 +544,8 @@ test("ships relocatable native setup and uninstall apps", async () => {
   assert.match(setupSource, /Existing installation found/);
   assert.match(setupSource, /applicationDidBecomeActive:[\s\S]*refreshStatusPreservingForm:YES/);
   assert.match(setupSource, /applicationShouldHandleReopen:[\s\S]*refreshStatusPreservingForm:YES/);
+  assert.match(setupSource, /@"CONTROL_MODULE_CONFIG_DIR"/);
+  assert.match(setupSource, /removeObjectForKey:key/);
   assert.match(setupSource, /Update & apply/);
   assert.match(setupSource, /Apply settings/);
   assert.match(setupSource, /Cancel operation/);

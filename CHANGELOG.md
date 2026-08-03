@@ -6,6 +6,11 @@ Notable user-facing changes are recorded here. Versions use `vMAJOR.UPDATE.FIX`.
 
 - No unreleased changes.
 
+## v1.03.3
+
+- Fixed Setup autodetection when opened from a running Control Module by isolating inherited per-instance settings from installation discovery.
+- Hardened lifecycle scripts so a project-specific settings path cannot be mistaken for the global installation registry.
+
 ## v1.03.2
 
 - Made Setup automatically re-check the current installation whenever its existing window is activated or reopened, while preserving unsaved form choices.

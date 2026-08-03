@@ -59,13 +59,18 @@ class ManageScriptTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
-    def run_manager(self, action: str = "status", check: bool = True) -> subprocess.CompletedProcess[str]:
+    def run_manager(
+        self,
+        action: str = "status",
+        check: bool = True,
+        environment: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             ["/bin/zsh", str(self.source / "support" / "mac" / "manage.sh"), action, "--source", str(self.source)],
             check=check,
             capture_output=True,
             text=True,
-            env=self.environment,
+            env=environment or self.environment,
         )
 
     def test_status_describes_an_uninstalled_source(self) -> None:
@@ -116,6 +121,15 @@ class ManageScriptTests(unittest.TestCase):
         self.assertEqual(status["installed_version"], "v1.02.1")
         self.assertEqual(status["shortcut"], "1")
         self.assertEqual(status["web_port"], "12025")
+
+        polluted_environment = {**self.environment}
+        polluted_environment.pop("CONTROL_MODULE_CONFIG_ROOT")
+        polluted_environment["CONTROL_MODULE_CONFIG_DIR"] = str(instance)
+        polluted_status = decode_status(
+            self.run_manager(environment=polluted_environment).stdout,
+        )
+        self.assertEqual(polluted_status["installed"], "1")
+        self.assertEqual(polluted_status["installed_version"], "v1.02.1")
 
         stopped = self.run_manager("stop")
         self.assertIn("stopped safely", stopped.stdout)

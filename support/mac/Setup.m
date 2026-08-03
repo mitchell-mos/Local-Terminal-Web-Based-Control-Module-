@@ -640,6 +640,20 @@ static NSStackView *CMVerticalStack(NSArray<NSView *> *views, CGFloat spacing) {
     NSPipe *errorPipe = [NSPipe pipe];
     task.executableURL = [NSURL fileURLWithPath:@"/bin/zsh"];
     task.arguments = [@[script] arrayByAddingObjectsFromArray:arguments];
+    NSMutableDictionary<NSString *, NSString *> *environment = [NSProcessInfo.processInfo.environment mutableCopy];
+    for (NSString *key in @[
+        @"CONTROL_MODULE_CONFIG_DIR",
+        @"CONTROL_MODULE_DATA_DIR",
+        @"CONTROL_MODULE_SOURCE_DIR",
+        @"CONTROL_MODULE_INSTANCE_ID",
+        @"CONTROL_MODULE_WEB_PORT",
+        @"CONTROL_MODULE_RUNNER_PORT",
+        @"CONTROL_MODULE_DIR",
+        @"CONTROL_MODULE_NO_OPEN",
+    ]) {
+        [environment removeObjectForKey:key];
+    }
+    task.environment = environment;
     task.standardOutput = outputPipe;
     task.standardError = errorPipe;
     __weak typeof(self) weakSelf = self;

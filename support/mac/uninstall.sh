@@ -3,7 +3,7 @@
 set -euo pipefail
 umask 077
 
-CONFIG_ROOT="${CONTROL_MODULE_CONFIG_ROOT:-${CONTROL_MODULE_CONFIG_DIR:-$HOME/Library/Application Support/Control Module}}"
+CONFIG_ROOT="${CONTROL_MODULE_CONFIG_ROOT:-$HOME/Library/Application Support/Control Module}"
 CONFIG_DIR=""
 SOURCE_DIR=""
 REMOVE_SOURCE=0

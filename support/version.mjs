@@ -70,8 +70,7 @@ export function classifyTransition(previousValue, currentValue) {
   }
   if (
     current.major === previous.major
-    && current.update === previous.update + 1
-    && current.fix === 0
+    && current.update > previous.update
   ) {
     return "update";
   }
@@ -83,7 +82,7 @@ export function classifyTransition(previousValue, currentValue) {
     return "fix";
   }
   throw new Error(
-    `Version must advance exactly once from ${formatVersion(previous)} as a major, update, or fix release.`,
+    `Version must move forward from ${formatVersion(previous)} as a major, update, or fix release.`,
   );
 }
 

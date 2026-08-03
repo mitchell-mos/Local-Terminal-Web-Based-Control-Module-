@@ -6,6 +6,25 @@ Notable user-facing changes are recorded here. Versions use `vMAJOR.UPDATE.FIX`.
 
 - No unreleased changes.
 
+## v1.04.2
+
+- Strengthened CodeQL-safe source tests to compare complete URL-construction and host-validation lines instead of URL substrings.
+
+## v1.04.1
+
+- Replaced URL-shaped regular-expression assertions with literal containment checks so CodeQL does not treat test-source checks as permissive URL validation.
+
+## v1.04.0
+
+- Replaced the sequential Setup dialogs with a larger native macOS interface that detects and explains existing installations.
+- Added ownership-checked status, Start, Stop, and Restart controls to Setup, including confirmation and in-progress cancellation states.
+- Made Setup re-check the installation when reopened, while preserving unsaved form choices.
+- Made the app and Desktop shortcut focus a healthy existing dashboard instead of launching duplicate services.
+- Detached lifecycle starts from Setup and launcher parent processes so closing either interface does not stop healthy services.
+- Added an explicit GitHub release check that runs only when requested and discloses its limited network behavior.
+- Added numeric version ordering, strict metadata consistency checks, and defense-in-depth downgrade blocking in both Setup and its installer.
+- Constrained lifecycle runtime paths, tightened package and install-destination verification, and stopped Basic inspection from following a symlinked package manifest.
+
 ## v1.02.1
 
 - Renamed the property-based fuzz suite to a JavaScript extension recognized by OpenSSF Scorecard while keeping it in the regular test run.

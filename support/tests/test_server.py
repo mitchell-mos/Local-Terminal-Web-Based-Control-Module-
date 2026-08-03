@@ -574,6 +574,19 @@ class ControlServerTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "inside your home folder"):
             control_server.inspect_project({"path": str(escaped_link), "port": 4325})
 
+    def test_project_inspection_does_not_follow_a_symlinked_manifest(self) -> None:
+        project = self.root / "linked-manifest-project"
+        project.mkdir()
+        outside_manifest = self.root / "outside-package.json"
+        outside_manifest.write_text(
+            json.dumps({"name": "outside", "scripts": {"dev": "outside-command"}}),
+            encoding="utf-8",
+        )
+        (project / "package.json").symlink_to(outside_manifest)
+
+        with self.assertRaisesRegex(ValueError, "symbolic link"):
+            control_server.inspect_project({"path": str(project), "port": 4325})
+
     def test_cors_header_uses_only_canonical_origin_constants(self) -> None:
         handler = object.__new__(control_server.ControlHandler)
         handler.send_header = unittest.mock.Mock()

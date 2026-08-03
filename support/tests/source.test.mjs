@@ -25,6 +25,7 @@ test("does not ship private user data or unrelated runtime state", async () => {
     read("server/browser_tabs.jxa"),
   ]);
   const publicSource = `${runner}\n${launcher}\n${page}\n${packageJson}\n${proxy}\n${browserTabs}`;
+  const browserTabLines = new Set(browserTabs.split("\n").map((line) => line.trim()));
 
   assert.doesNotMatch(publicSource, /\/Users\/[A-Za-z0-9._-]+/);
   assert.match(launcher, /local url="\$\{WEB_URL\}"/);
@@ -98,8 +99,8 @@ test("does not ship private user data or unrelated runtime state", async () => {
   assert.doesNotMatch(restartIcon, /transform=|stroke-width=/);
   assert.match(runner, /\/api\/projects\/browser-tabs/);
   assert.match(runner, /project_browser_tabs/);
-  assert.match(browserTabs, /http:\/\/127\.0\.0\.1:/);
-  assert.match(browserTabs, /http:\/\/localhost:/);
+  assert.ok(browserTabLines.has('"http://127.0.0.1:" + port,'));
+  assert.ok(browserTabLines.has('"http://localhost:" + port,'));
   assert.match(browserTabs, /tab\.url\(\)/);
   assert.match(browserTabs, /freshProjectUrl\(tabUrl\)/);
   assert.match(browserTabs, /browserWindow\.currentTab = tab/);
@@ -118,6 +119,7 @@ test("matches local browser tabs by port while preserving nested routes", async 
   const context = { Date: { now: () => 123456 } };
   runInNewContext(source, context);
 
+  assert.equal(JSON.parse(context.run(["1025", "detect"])).available, true);
   assert.equal(context.isMatchingProjectUrl("http://localhost:4321/", 4321), true);
   assert.equal(context.isMatchingProjectUrl("http://127.0.0.1:4321/about/team#staff", 4321), true);
   assert.equal(context.isMatchingProjectUrl("https://localhost:4321/settings?tab=local", 4321), true);
@@ -127,6 +129,22 @@ test("matches local browser tabs by port while preserving nested routes", async 
     context.freshProjectUrl("http://127.0.0.1:4321/about?tab=team#staff"),
     "http://127.0.0.1:4321/about?tab=team&_control_reload=123456#staff",
   );
+});
+
+test("reuses a healthy dashboard instead of launching a duplicate", async () => {
+  const launcher = await read("ControlModule");
+  const assetPattern = launcher.match(/BOOTSTRAP_ASSET_PATTERN='([^']+)'/);
+
+  assert.ok(assetPattern, "the launcher must declare its dashboard asset pattern");
+  const assetMatcher = new RegExp(assetPattern[1]);
+  assert.equal(assetMatcher.test("/_next/static/chunks/index-DwlVrl8l.js"), true);
+  assert.equal(assetMatcher.test("/assets/index-CGqTNnpo.js"), true);
+  assert.doesNotMatch(launcher, /curl[^\n]*\|\s*\/usr\/bin\/grep -q/);
+  assert.match(launcher, /server\/browser_tabs\.jxa/);
+  assert.match(launcher, /"\$WEB_PORT" focus/);
+  assert.match(launcher, /shlock -f "\$LAUNCH_LOCK_FILE"/);
+  assert.match(launcher, /wait_for_running_instance_or_launch_turn/);
+  assert.match(launcher, /if acquire_launch_lock; then\s+return 2/);
 });
 
 test("publishes a consistent user-facing release version", async () => {
@@ -160,11 +178,26 @@ test("publishes a consistent user-facing release version", async () => {
   assert.equal(classifyTransition(release, bumpVersion(release, "fix")), "fix");
   assert.equal(classifyTransition(release, bumpVersion(release, "update")), "update");
   assert.equal(classifyTransition(release, bumpVersion(release, "major")), "major");
-  assert.throws(() => classifyTransition(release, release), /must advance exactly once/);
+  assert.equal(
+    classifyTransition({ major: 1, update: 2, fix: 1 }, { major: 1, update: 4, fix: 0 }),
+    "update",
+  );
+  assert.equal(
+    classifyTransition({ major: 1, update: 2, fix: 1 }, { major: 1, update: 4, fix: 1 }),
+    "update",
+  );
+  assert.throws(
+    () => classifyTransition({ major: 1, update: 2, fix: 1 }, { major: 1, update: 1, fix: 9 }),
+    /must move forward/,
+  );
+  assert.throws(() => classifyTransition(release, release), /must move forward/);
   assert.match(versionSource, /APP_VERSION_LABEL/);
   assert.match(page, /Control Module <code>\{APP_VERSION_LABEL\}<\/code>/);
   assert.match(page, /Report a bug/);
+  assert.match(page, /Check releases/);
   assert.match(readme, /vMAJOR\.UPDATE\.FIX/);
+  assert.match(readme, /Check GitHub for updates/);
+  assert.match(readme, /git pull --ff-only/);
   assert.match(versionWorkflow, /on:\s*\n\s*pull_request:/);
   assert.doesNotMatch(versionWorkflow, /on:\s*\n\s*push:/);
   assert.match(versionWorkflow, /pull_request\.user\.login == 'dependabot\[bot\]'/);
@@ -185,6 +218,9 @@ test("keeps private runtime and local development artifacts out of Git", async (
     "/control-data.sqlite*",
     "/DESIGN.md",
     "/PRODUCT.md",
+    "/Control Module [0-9]*.app/",
+    "/Setup [0-9]*.app/",
+    "**/* [0-9].*",
     "__pycache__/",
   ]) {
     assert.match(ignore, new RegExp(expected.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
@@ -393,14 +429,17 @@ test("uninstall distinguishes a Finder copy with a duplicated instance marker", 
 });
 
 test("ships relocatable native setup and uninstall apps", async () => {
-  const [launcher, nativeLauncher, installer, uninstaller, builder, setupBuilder, setupSource, setupStore, removeBuilder, uninstallSource, iconBuilder, trashIcon, plist, readme, ciWorkflow, releaseBuilder] = await Promise.all([
+  const [launcher, nativeLauncher, installer, uninstaller, manager, versionHelper, builder, setupBuilder, setupSource, setupPlist, setupStore, removeBuilder, uninstallSource, iconBuilder, trashIcon, plist, readme, ciWorkflow, releaseBuilder] = await Promise.all([
     read("ControlModule"),
     read("support/mac/Launch.applescript"),
     read("support/mac/install.sh"),
     read("support/mac/uninstall.sh"),
+    read("support/mac/manage.sh"),
+    read("support/mac/version.sh"),
     read("support/mac/app.sh"),
     read("support/mac/setup.sh"),
-    read("support/mac/Setup.applescript"),
+    read("support/mac/Setup.m"),
+    read("support/mac/Setup.plist"),
     read("support/mac/store.sh"),
     read("support/mac/remove.sh"),
     read("support/mac/Uninstall.applescript"),
@@ -411,6 +450,7 @@ test("ships relocatable native setup and uninstall apps", async () => {
     read(".github/workflows/ci.yml"),
     read("support/mac/release.sh"),
   ]);
+  const setupLines = new Set(setupSource.split("\n").map((line) => line.trim()));
 
   assert.match(launcher, /Library\/Application Support\/Control Module/);
   assert.match(launcher, /server\/control_server\.py/);
@@ -425,6 +465,8 @@ test("ships relocatable native setup and uninstall apps", async () => {
   assert.match(launcher, /save_runner_port/);
   assert.match(launcher, /stop_broken_owned_runner/);
   assert.match(launcher, /RUNNER_PORT_CHANGED/);
+  assert.match(launcher, /CONFIGURED_RUNTIME_DIR.*USER_CONFIG_DIR:A.*workspace/s);
+  assert.match(launcher, /configured_source_id.*INSTANCE_ID/s);
   assert.match(launcher, /selected dashboard port \$WEB_PORT/);
   assert.doesNotMatch(launcher, /private runner port \$RUNNER_PORT is already being used/);
   assert.match(launcher, /\/assets\/index-/);
@@ -435,17 +477,22 @@ test("ships relocatable native setup and uninstall apps", async () => {
   assert.match(nativeLauncher, /\/bin\/zsh/);
   assert.doesNotMatch(nativeLauncher, /on open location|--authorize-url/);
   assert.match(installer, /project-path/);
+  assert.match(installer, /plutil -extract name raw/);
+  assert.match(installer, /case "\$DESTINATION_APP" in/);
+  assert.match(installer, /personal Applications folder/);
   assert.match(installer, /install-path/);
   assert.match(installer, /runtime-path/);
   assert.match(installer, /desktop-access/);
   assert.match(installer, /prepare_private_workspace/);
   assert.match(installer, /private workspace is replaced atomically/i);
+  assert.match(installer, /version\.json/);
   assert.ok(
     installer.indexOf('if web_port_is_reserved_by_other_instance "$WEB_PORT"; then')
       < installer.indexOf('"$SCRIPT_DIR/uninstall.sh" --source "$SOURCE_DIR" --stop-only'),
     "dashboard-port conflicts must be rejected before the running instance is stopped",
   );
   assert.match(installer, /retire_previous_app/);
+  assert.match(installer, /manage\.sh" start --source "\$SOURCE_DIR"/);
   assert.match(installer, /app_instance_id "\$CURRENT_INSTALL_APP"/);
   assert.match(installer, /\.Trash/);
   assert.match(installer, /--web-port/);
@@ -465,6 +512,7 @@ test("ships relocatable native setup and uninstall apps", async () => {
   assert.match(uninstaller, /\.control-module-instance/);
   assert.match(uninstaller, /runner-port/);
   assert.match(uninstaller, /runtime-path/);
+  assert.match(uninstaller, /RUNTIME_DIR.*CONFIG_DIR\/workspace/);
   assert.match(uninstaller, /--dry-run/);
   assert.match(uninstaller, /--stop-only/);
   assert.match(uninstaller, /Other Control Module folders, apps, shortcuts, browser data, and settings: keep/);
@@ -474,8 +522,28 @@ test("ships relocatable native setup and uninstall apps", async () => {
   assert.doesNotMatch(uninstaller, /rm -rf/);
   assert.match(uninstaller, /\.Trash/);
   assert.match(uninstaller, /Refusing to operate/);
+  assert.match(manager, /status\|start\|stop\|restart/);
+  assert.doesNotMatch(manager, /CONFIG_ROOT=.*CONTROL_MODULE_CONFIG_DIR/);
+  assert.doesNotMatch(installer, /CONFIG_ROOT=.*CONTROL_MODULE_CONFIG_DIR/);
+  assert.doesNotMatch(uninstaller, /CONFIG_ROOT=.*CONTROL_MODULE_CONFIG_DIR/);
+  assert.match(manager, /app_instance_id/);
+  assert.match(manager, /listener_uses_instance/);
+  assert.match(manager, /uninstall\.sh" --source "\$SOURCE_DIR" --stop-only/);
+  assert.match(manager, /Contents\/Resources\/ControlModule/);
+  assert.match(manager, /\/usr\/bin\/open -n "\$INSTALL_APP"/);
+  assert.match(manager, /\/usr\/bin\/nohup \/bin\/zsh/);
+  assert.match(manager, /<\/dev\/null >\/dev\/null 2>&1 &!/);
+  assert.match(manager, /app_parent.*\$HOME\/Applications/);
+  assert.match(manager, /RUNTIME_DIR.*CONFIG_DIR\/workspace/);
+  assert.match(manager, /control_module_version_label/);
+  assert.match(manager, /version_relation/);
+  assert.match(versionHelper, /control_module_version_relation/);
+  assert.match(installer, /Setup blocks downgrades/);
+  assert.match(manager, /\/usr\/bin\/base64/);
   assert.match(builder, /ControlModule\.icns/);
   assert.match(builder, /Launch\.applescript/);
+  assert.match(builder, /CFBundleShortVersionString/);
+  assert.match(builder, /CFBundleVersion/);
   assert.match(builder, /lipo.*-thin arm64/);
   assert.match(builder, /ditto "\$RUNTIME_DIR"/);
   assert.match(builder, /Contents\/Resources\/instance-id/);
@@ -487,33 +555,56 @@ test("ships relocatable native setup and uninstall apps", async () => {
   assert.match(plist, /NSAppleEventsUsageDescription/);
   assert.match(plist, /refresh or focus them after you restart a host/);
   assert.match(builder, /codesign --verify --deep "\$OUTPUT_APP"/);
-  assert.match(setupBuilder, /osacompile/);
+  assert.match(setupBuilder, /xcrun --sdk macosx clang/);
+  assert.match(setupBuilder, /Setup\.m/);
+  assert.match(setupBuilder, /Setup\.plist/);
   assert.match(setupBuilder, /Setup\.app/);
-  assert.match(setupBuilder, /lipo.*-thin arm64/);
-  assert.match(setupBuilder, /LSRequiresNativeExecution/);
+  assert.match(setupBuilder, /Contents\/MacOS\/Setup/);
+  assert.match(setupBuilder, /-target arm64-apple-macos13\.0/);
+  assert.match(setupBuilder, /lipo.*-verify_arch arm64/);
   assert.match(setupBuilder, /xattr -d com\.apple\.FinderInfo "\$OUTPUT_APP"/);
   assert.match(setupBuilder, /codesign --verify --deep --strict "\$STAGING_APP"/);
   assert.match(setupBuilder, /codesign --verify --deep "\$OUTPUT_APP"/);
+  assert.match(setupPlist, /LSRequiresNativeExecution/);
+  assert.match(setupPlist, /arm64/);
+  assert.match(setupPlist, /CFBundleExecutable/);
+  assert.match(setupPlist, /<string>Setup<\/string>/);
   assert.match(ciWorkflow, /support\/mac\/setup\.sh/);
   assert.match(ciWorkflow, /support\/mac\/remove\.sh/);
   assert.match(releaseBuilder, /support\/mac\/setup\.sh/);
   assert.match(releaseBuilder, /support\/mac\/remove\.sh/);
   assert.match(setupSource, /Dashboard port/);
   assert.match(setupSource, /--web-port/);
-  assert.match(setupSource, /Desktop access/);
-  assert.match(setupSource, /Keep Desktop private/);
   assert.match(setupSource, /--desktop-access/);
+  assert.match(setupSource, /--desktop-shortcut/);
   assert.match(setupSource, /support\/mac\/store\.sh/);
+  assert.match(setupSource, /support\/mac\/manage\.sh/);
+  assert.match(setupSource, /Existing installation found/);
+  assert.match(setupSource, /applicationDidBecomeActive:[\s\S]*refreshStatusPreservingForm:YES/);
+  assert.match(setupSource, /applicationShouldHandleReopen:[\s\S]*refreshStatusPreservingForm:YES/);
+  assert.match(setupSource, /@"CONTROL_MODULE_CONFIG_DIR"/);
+  assert.match(setupSource, /removeObjectForKey:key/);
+  assert.match(setupSource, /Update & apply/);
+  assert.match(setupSource, /Older version blocked/);
+  assert.ok(setupLines.has('NSURL *endpoint = [NSURL URLWithString:@"https://api.github.com/repos/mitchell-mos/Local-Terminal-Web-Based-Control-Module-/releases/latest"];'));
+  assert.ok(setupLines.has('NSURL *endpoint = [NSURL URLWithString:@"https://api.github.com/repos/mitchell-mos/Local-Terminal-Web-Based-Control-Module-/contents/version.json?ref=main"];'));
+  assert.ok(setupSource.includes("application/vnd.github.raw+json"));
+  assert.match(setupSource, /ephemeralSessionConfiguration/);
+  assert.match(setupSource, /willPerformHTTPRedirection/);
+  assert.ok(setupLines.has('completionHandler([url.scheme isEqualToString:@"https"] && [url.host isEqualToString:@"api.github.com"]'));
+  assert.match(setupSource, /data\.length > 131072/);
+  assert.ok(setupLines.has('if (![url.scheme isEqualToString:@"https"] || ![url.host isEqualToString:@"github.com"]) {'));
+  assert.match(setupSource, /Apply settings/);
+  assert.match(setupSource, /Cancel operation/);
+  assert.match(setupSource, /Start/);
+  assert.match(setupSource, /Stop/);
+  assert.match(setupSource, /Restart/);
   assert.match(setupSource, /Control Module folder/);
-  assert.doesNotMatch(setupSource, /installLocation is "Desktop"/);
   assert.match(setupSource, /Desktop shortcut/);
-  assert.doesNotMatch(setupSource, /Control Module and Setup shortcuts/);
-  assert.match(setupSource, /stay in the Control Module folder/);
-  assert.match(setupSource, /dashboard, settings, and saved projects stay on this Mac/i);
+  assert.match(setupSource, /Keep Setup\.app in the downloaded Control Module folder/);
+  assert.match(setupSource, /Changes apply only to this verified Control Module copy/);
+  assert.match(setupSource, /URLByDeletingLastPathComponent/);
   assert.doesNotMatch(setupSource, /choose folder/i);
-  assert.match(setupSource, /parentFolder/);
-  assert.match(setupSource, /\/bin\/test/);
-  assert.doesNotMatch(setupSource, /\/usr\/bin\/test/);
   assert.match(setupStore, /SOURCE_DIR\/Setup\.app/);
   assert.match(setupStore, /Desktop\/Setup\.app/);
   assert.doesNotMatch(setupStore, /ln -s/);

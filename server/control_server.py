@@ -401,6 +401,10 @@ def validate_project_directory(raw_path: Any) -> Path:
 
 def read_project_manifest(directory: Path) -> dict[str, Any] | None:
     manifest_path = directory / "package.json"
+    if manifest_path.is_symlink():
+        raise ValueError(
+            "package.json is a symbolic link. Replace it with a file inside the project folder or use Advanced."
+        )
     if not manifest_path.is_file():
         return None
     try:

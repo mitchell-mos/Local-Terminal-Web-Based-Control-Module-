@@ -4213,6 +4213,13 @@ export default function Home() {
           >
             User guide
           </a>
+          <a
+            href={`${PROJECT_REPOSITORY_URL}/releases`}
+            target="_blank"
+            rel="noreferrer"
+          >
+            Check releases
+          </a>
           <a href={REPORT_BUG_URL} target="_blank" rel="noreferrer">
             Report a bug
           </a>
@@ -4303,8 +4310,9 @@ export default function Home() {
                   <div>
                     <strong>Port, source, and installation</strong>
                     <p>
-                      The verified native Setup app applies these changes safely. Source mode does not grant
-                      or revoke macOS permission; review Files &amp; Folders access in System Settings.
+                      The verified native Setup app applies these changes safely and can check GitHub for a
+                      newer release when you ask. Source mode does not grant or revoke macOS permission;
+                      review Files &amp; Folders access in System Settings.
                     </p>
                   </div>
                   <button
@@ -4362,7 +4370,7 @@ export default function Home() {
             </h2>
             <p id="native-app-prompt-description">
               {nativeAppPrompt === "settings"
-                ? "This opens the verified native Setup app, where you can change the dashboard port, Desktop access, install location, and shortcut."
+                ? "This opens the verified native Setup app, where you can manage this installation and manually check for a newer GitHub release."
                 : "This opens the verified native Uninstall app. It will ask you again before moving this Control Module folder to Trash."}
             </p>
             <div className="stop-all-safety">

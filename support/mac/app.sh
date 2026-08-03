@@ -57,8 +57,8 @@ done
 SOURCE_DIR="${SOURCE_DIR:A}"
 OUTPUT_APP="${OUTPUT_APP:A}"
 
-if [[ ! -f "$SOURCE_DIR/package.json" || ! -x "$SOURCE_DIR/ControlModule" || ! -f "$SOURCE_DIR/server/control_server.py" || ! -f "$SOURCE_LAUNCHER" ]]; then
-  print -u2 -- "The source folder must contain the Control Module launcher, package, server, and native launcher source."
+if [[ ! -f "$SOURCE_DIR/package.json" || ! -f "$SOURCE_DIR/version.json" || ! -x "$SOURCE_DIR/ControlModule" || ! -f "$SOURCE_DIR/server/control_server.py" || ! -f "$SOURCE_LAUNCHER" ]]; then
+  print -u2 -- "The source folder must contain the Control Module launcher, package, version, server, and native launcher source."
   exit 1
 fi
 
@@ -100,6 +100,12 @@ trap cleanup EXIT HUP INT TERM
 /bin/chmod 755 "$STAGING_APP/Contents/Resources/ControlModule"
 /bin/cp "$SOURCE_DIR/support/mac/App.plist" "$STAGING_APP/Contents/Info.plist"
 /bin/cp "$SOURCE_DIR/support/mac/App.icns" "$STAGING_APP/Contents/Resources/ControlModule.icns"
+VERSION_MAJOR="$(/usr/bin/plutil -extract major raw "$SOURCE_DIR/version.json")"
+VERSION_UPDATE="$(/usr/bin/plutil -extract update raw "$SOURCE_DIR/version.json")"
+VERSION_FIX="$(/usr/bin/plutil -extract fix raw "$SOURCE_DIR/version.json")"
+PLIST_VERSION="$VERSION_MAJOR.$VERSION_UPDATE.$VERSION_FIX"
+/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $PLIST_VERSION" "$STAGING_APP/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $PLIST_VERSION" "$STAGING_APP/Contents/Info.plist"
 if [[ -n "$INSTANCE_ID" ]]; then
   print -r -- "$INSTANCE_ID" > "$STAGING_APP/Contents/Resources/instance-id"
   /bin/chmod 600 "$STAGING_APP/Contents/Resources/instance-id"

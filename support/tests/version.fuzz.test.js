@@ -57,10 +57,11 @@ test("fuzzes every valid release transition", () => {
     fc.property(
       releaseVersion.filter((version) => version.update < 99),
       fc.integer({ min: 1, max: 99 }),
-      (version, increment) => {
+      fc.integer({ min: 0, max: 1_000_000 }),
+      (version, increment, fix) => {
         const nextUpdate = Math.min(99, version.update + increment);
         assert.equal(
-          classifyTransition(version, { major: version.major, update: nextUpdate, fix: 0 }),
+          classifyTransition(version, { major: version.major, update: nextUpdate, fix }),
           "update",
         );
       },

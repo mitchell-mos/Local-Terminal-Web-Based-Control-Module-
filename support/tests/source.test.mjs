@@ -98,8 +98,8 @@ test("does not ship private user data or unrelated runtime state", async () => {
   assert.doesNotMatch(restartIcon, /transform=|stroke-width=/);
   assert.match(runner, /\/api\/projects\/browser-tabs/);
   assert.match(runner, /project_browser_tabs/);
-  assert.match(browserTabs, /http:\/\/127\.0\.0\.1:/);
-  assert.match(browserTabs, /http:\/\/localhost:/);
+  assert.ok(browserTabs.includes("http://127.0.0.1:"));
+  assert.ok(browserTabs.includes("http://localhost:"));
   assert.match(browserTabs, /tab\.url\(\)/);
   assert.match(browserTabs, /freshProjectUrl\(tabUrl\)/);
   assert.match(browserTabs, /browserWindow\.currentTab = tab/);
@@ -181,9 +181,9 @@ test("publishes a consistent user-facing release version", async () => {
     classifyTransition({ major: 1, update: 2, fix: 1 }, { major: 1, update: 4, fix: 0 }),
     "update",
   );
-  assert.throws(
-    () => classifyTransition({ major: 1, update: 2, fix: 1 }, { major: 1, update: 4, fix: 1 }),
-    /must move forward/,
+  assert.equal(
+    classifyTransition({ major: 1, update: 2, fix: 1 }, { major: 1, update: 4, fix: 1 }),
+    "update",
   );
   assert.throws(
     () => classifyTransition({ major: 1, update: 2, fix: 1 }, { major: 1, update: 1, fix: 9 }),
@@ -584,14 +584,14 @@ test("ships relocatable native setup and uninstall apps", async () => {
   assert.match(setupSource, /removeObjectForKey:key/);
   assert.match(setupSource, /Update & apply/);
   assert.match(setupSource, /Older version blocked/);
-  assert.match(setupSource, /api\.github\.com\/repos\/mitchell-mos\/Local-Terminal-Web-Based-Control-Module-\/releases\/latest/);
-  assert.match(setupSource, /contents\/version\.json\?ref=main/);
-  assert.match(setupSource, /application\/vnd\.github\.raw\+json/);
+  assert.ok(setupSource.includes("https://api.github.com/repos/mitchell-mos/Local-Terminal-Web-Based-Control-Module-/releases/latest"));
+  assert.ok(setupSource.includes("contents/version.json?ref=main"));
+  assert.ok(setupSource.includes("application/vnd.github.raw+json"));
   assert.match(setupSource, /ephemeralSessionConfiguration/);
   assert.match(setupSource, /willPerformHTTPRedirection/);
-  assert.match(setupSource, /url\.host isEqualToString:@"api\.github\.com"/);
+  assert.ok(setupSource.includes('url.host isEqualToString:@"api.github.com"'));
   assert.match(setupSource, /data\.length > 131072/);
-  assert.match(setupSource, /github\.com/);
+  assert.ok(setupSource.includes("github.com"));
   assert.match(setupSource, /Apply settings/);
   assert.match(setupSource, /Cancel operation/);
   assert.match(setupSource, /Start/);

@@ -71,7 +71,6 @@ export function classifyTransition(previousValue, currentValue) {
   if (
     current.major === previous.major
     && current.update > previous.update
-    && current.fix === 0
   ) {
     return "update";
   }

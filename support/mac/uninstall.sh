@@ -62,7 +62,7 @@ if [[ ! -f "$SOURCE_DIR/package.json" \
   || ! -x "$SOURCE_DIR/ControlModule" \
   || ! -f "$SOURCE_DIR/server/control_server.py" \
   || ! -x "$SOURCE_DIR/support/mac/uninstall.sh" ]] \
-  || ! /usr/bin/grep -Eq '"name"[[:space:]]*:[[:space:]]*"control-module"' "$SOURCE_DIR/package.json"; then
+  || [[ "$(/usr/bin/plutil -extract name raw "$SOURCE_DIR/package.json" 2>/dev/null || true)" != "control-module" ]]; then
   print -u2 -- "The Control Module folder could not be verified. Nothing was changed."
   exit 1
 fi
@@ -124,6 +124,9 @@ if (( INSTANCE_IS_CONFIGURED )) && [[ -r "$CONFIG_DIR/runtime-path" ]]; then
   IFS= read -r RUNTIME_DIR < "$CONFIG_DIR/runtime-path" || true
 fi
 [[ -n "$RUNTIME_DIR" ]] && RUNTIME_DIR="${RUNTIME_DIR:A}"
+if [[ -n "$RUNTIME_DIR" && "$RUNTIME_DIR" != "$SOURCE_DIR" && "$RUNTIME_DIR" != "$CONFIG_DIR/workspace" ]]; then
+  RUNTIME_DIR=""
+fi
 if [[ "$WEB_PORT" != <-> ]] || (( WEB_PORT < 1025 || WEB_PORT > 65535 )); then
   print -u2 -- "The configured dashboard port is invalid. Nothing was changed."
   exit 1

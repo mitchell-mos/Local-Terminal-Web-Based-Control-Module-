@@ -13,9 +13,11 @@ Control Module is a single-user local development tool. The supported deployment
 
 ## Filesystem access
 
-Basic project inspection accepts an absolute path, resolves symbolic links and traversal, requires the result to remain inside the user's home directory, and reads only supported top-level metadata. Runtime data uses private permissions and atomic replacement.
+Basic project inspection accepts an absolute path, resolves symbolic links and traversal, requires the result to remain inside the user's home directory, rejects a symbolic-link `package.json`, and reads only supported top-level metadata. Runtime data uses private permissions and atomic replacement.
 
-Setup and Uninstall verify package identity, app bundle identifiers, canonical paths, and matching installation markers before modifying anything. Uninstall targets one verified downloaded folder and never recursively removes a broad home, Desktop, Applications, or workspace path.
+Setup and Uninstall verify package identity, app bundle identifiers, canonical paths, matching installation markers, and installation-owned runtime paths before modifying anything. Setup blocks a downloaded version that is older than or cannot be safely compared with an existing installation. Uninstall targets one verified downloaded folder and never recursively removes a broad home, Desktop, Applications, or workspace path.
+
+Rollback protection begins with Setup v1.04.0. An installer downloaded before that control existed cannot enforce a future policy, and version metadata from an untrusted fork is not proof of authenticity. Discard superseded installers and verify release checksums and build provenance before running Setup.
 
 ## Processes and ports
 
@@ -25,7 +27,7 @@ The Mac lock monitor reads only the system console lock flag. After 15 continuou
 
 ## Privacy
 
-The application does not include analytics, telemetry, advertising, cloud storage, accounts, or an external application backend. Setup's documented Node.js download and links explicitly opened by the user are the expected external network actions.
+The application does not include analytics, telemetry, advertising, cloud storage, accounts, or an external application backend. Setup's documented Node.js download, its user-initiated GitHub update check, and links explicitly opened by the user are the expected external network actions. The update check requests only the latest public release tag and, when no release exists, the public `version.json` on `main`. It sends no local project data, settings, logs, paths, commands, or tokens; GitHub receives ordinary connection metadata such as the requester's IP address.
 
 Project definitions, commands, local paths, logs, settings, and tokens stay on disk. Export files intentionally include saved commands and may therefore contain private paths. Error summaries shown in the interface redact common credential assignments, but users should still remove private details from screenshots and reports.
 

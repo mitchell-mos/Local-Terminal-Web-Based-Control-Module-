@@ -6,26 +6,16 @@ Notable user-facing changes are recorded here. Versions use `vMAJOR.UPDATE.FIX`.
 
 - No unreleased changes.
 
-## v1.03.3
-
-- Fixed Setup autodetection when opened from a running Control Module by isolating inherited per-instance settings from installation discovery.
-- Hardened lifecycle scripts so a project-specific settings path cannot be mistaken for the global installation registry.
-
-## v1.03.2
-
-- Made Setup automatically re-check the current installation whenever its existing window is activated or reopened, while preserving unsaved form choices.
-
-## v1.03.1
-
-- Fixed healthy dashboard detection for current and legacy asset layouts so reopening the app does not restart an existing instance.
-- Made the app and Desktop shortcut focus an existing dashboard tab, including nested routes, or open a new tab when none exists.
-- Serialized concurrent launches so repeated app or Desktop-shortcut clicks reuse the same local services.
-
-## v1.03.0
+## v1.04.0
 
 - Replaced the sequential Setup dialogs with a larger native macOS interface that detects and explains existing installations.
 - Added ownership-checked status, Start, Stop, and Restart controls to Setup, including confirmation and in-progress cancellation states.
-- Preserved release metadata in private working copies so Setup can clearly distinguish installed and available versions.
+- Made Setup re-check the installation when reopened, while preserving unsaved form choices.
+- Made the app and Desktop shortcut focus a healthy existing dashboard instead of launching duplicate services.
+- Detached lifecycle starts from Setup and launcher parent processes so closing either interface does not stop healthy services.
+- Added an explicit GitHub release check that runs only when requested and discloses its limited network behavior.
+- Added numeric version ordering, strict metadata consistency checks, and defense-in-depth downgrade blocking in both Setup and its installer.
+- Constrained lifecycle runtime paths, tightened package and install-destination verification, and stopped Basic inspection from following a symlinked package manifest.
 
 ## v1.02.1
 

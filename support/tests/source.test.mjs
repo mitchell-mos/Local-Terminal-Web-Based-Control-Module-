@@ -142,6 +142,8 @@ test("reuses a healthy dashboard instead of launching a duplicate", async () => 
   assert.match(launcher, /server\/browser_tabs\.jxa/);
   assert.match(launcher, /"\$WEB_PORT" focus/);
   assert.match(launcher, /shlock -f "\$LAUNCH_LOCK_FILE"/);
+  assert.match(launcher, /wait_for_running_instance_or_launch_turn/);
+  assert.match(launcher, /if acquire_launch_lock; then\s+return 2/);
 });
 
 test("publishes a consistent user-facing release version", async () => {
@@ -175,11 +177,26 @@ test("publishes a consistent user-facing release version", async () => {
   assert.equal(classifyTransition(release, bumpVersion(release, "fix")), "fix");
   assert.equal(classifyTransition(release, bumpVersion(release, "update")), "update");
   assert.equal(classifyTransition(release, bumpVersion(release, "major")), "major");
-  assert.throws(() => classifyTransition(release, release), /must advance exactly once/);
+  assert.equal(
+    classifyTransition({ major: 1, update: 2, fix: 1 }, { major: 1, update: 4, fix: 0 }),
+    "update",
+  );
+  assert.throws(
+    () => classifyTransition({ major: 1, update: 2, fix: 1 }, { major: 1, update: 4, fix: 1 }),
+    /must move forward/,
+  );
+  assert.throws(
+    () => classifyTransition({ major: 1, update: 2, fix: 1 }, { major: 1, update: 1, fix: 9 }),
+    /must move forward/,
+  );
+  assert.throws(() => classifyTransition(release, release), /must move forward/);
   assert.match(versionSource, /APP_VERSION_LABEL/);
   assert.match(page, /Control Module <code>\{APP_VERSION_LABEL\}<\/code>/);
   assert.match(page, /Report a bug/);
+  assert.match(page, /Check releases/);
   assert.match(readme, /vMAJOR\.UPDATE\.FIX/);
+  assert.match(readme, /Check GitHub for updates/);
+  assert.match(readme, /git pull --ff-only/);
   assert.match(versionWorkflow, /on:\s*\n\s*pull_request:/);
   assert.doesNotMatch(versionWorkflow, /on:\s*\n\s*push:/);
   assert.match(versionWorkflow, /pull_request\.user\.login == 'dependabot\[bot\]'/);
@@ -200,6 +217,9 @@ test("keeps private runtime and local development artifacts out of Git", async (
     "/control-data.sqlite*",
     "/DESIGN.md",
     "/PRODUCT.md",
+    "/Control Module [0-9]*.app/",
+    "/Setup [0-9]*.app/",
+    "**/* [0-9].*",
     "__pycache__/",
   ]) {
     assert.match(ignore, new RegExp(expected.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
@@ -408,12 +428,13 @@ test("uninstall distinguishes a Finder copy with a duplicated instance marker", 
 });
 
 test("ships relocatable native setup and uninstall apps", async () => {
-  const [launcher, nativeLauncher, installer, uninstaller, manager, builder, setupBuilder, setupSource, setupPlist, setupStore, removeBuilder, uninstallSource, iconBuilder, trashIcon, plist, readme, ciWorkflow, releaseBuilder] = await Promise.all([
+  const [launcher, nativeLauncher, installer, uninstaller, manager, versionHelper, builder, setupBuilder, setupSource, setupPlist, setupStore, removeBuilder, uninstallSource, iconBuilder, trashIcon, plist, readme, ciWorkflow, releaseBuilder] = await Promise.all([
     read("ControlModule"),
     read("support/mac/Launch.applescript"),
     read("support/mac/install.sh"),
     read("support/mac/uninstall.sh"),
     read("support/mac/manage.sh"),
+    read("support/mac/version.sh"),
     read("support/mac/app.sh"),
     read("support/mac/setup.sh"),
     read("support/mac/Setup.m"),
@@ -442,6 +463,8 @@ test("ships relocatable native setup and uninstall apps", async () => {
   assert.match(launcher, /save_runner_port/);
   assert.match(launcher, /stop_broken_owned_runner/);
   assert.match(launcher, /RUNNER_PORT_CHANGED/);
+  assert.match(launcher, /CONFIGURED_RUNTIME_DIR.*USER_CONFIG_DIR:A.*workspace/s);
+  assert.match(launcher, /configured_source_id.*INSTANCE_ID/s);
   assert.match(launcher, /selected dashboard port \$WEB_PORT/);
   assert.doesNotMatch(launcher, /private runner port \$RUNNER_PORT is already being used/);
   assert.match(launcher, /\/assets\/index-/);
@@ -452,6 +475,9 @@ test("ships relocatable native setup and uninstall apps", async () => {
   assert.match(nativeLauncher, /\/bin\/zsh/);
   assert.doesNotMatch(nativeLauncher, /on open location|--authorize-url/);
   assert.match(installer, /project-path/);
+  assert.match(installer, /plutil -extract name raw/);
+  assert.match(installer, /case "\$DESTINATION_APP" in/);
+  assert.match(installer, /personal Applications folder/);
   assert.match(installer, /install-path/);
   assert.match(installer, /runtime-path/);
   assert.match(installer, /desktop-access/);
@@ -464,6 +490,7 @@ test("ships relocatable native setup and uninstall apps", async () => {
     "dashboard-port conflicts must be rejected before the running instance is stopped",
   );
   assert.match(installer, /retire_previous_app/);
+  assert.match(installer, /manage\.sh" start --source "\$SOURCE_DIR"/);
   assert.match(installer, /app_instance_id "\$CURRENT_INSTALL_APP"/);
   assert.match(installer, /\.Trash/);
   assert.match(installer, /--web-port/);
@@ -483,6 +510,7 @@ test("ships relocatable native setup and uninstall apps", async () => {
   assert.match(uninstaller, /\.control-module-instance/);
   assert.match(uninstaller, /runner-port/);
   assert.match(uninstaller, /runtime-path/);
+  assert.match(uninstaller, /RUNTIME_DIR.*CONFIG_DIR\/workspace/);
   assert.match(uninstaller, /--dry-run/);
   assert.match(uninstaller, /--stop-only/);
   assert.match(uninstaller, /Other Control Module folders, apps, shortcuts, browser data, and settings: keep/);
@@ -499,13 +527,21 @@ test("ships relocatable native setup and uninstall apps", async () => {
   assert.match(manager, /app_instance_id/);
   assert.match(manager, /listener_uses_instance/);
   assert.match(manager, /uninstall\.sh" --source "\$SOURCE_DIR" --stop-only/);
-  assert.match(manager, /\/usr\/bin\/open "\$INSTALL_APP"/);
+  assert.match(manager, /Contents\/Resources\/ControlModule/);
+  assert.match(manager, /\/usr\/bin\/open -n "\$INSTALL_APP"/);
+  assert.match(manager, /\/usr\/bin\/nohup \/bin\/zsh/);
+  assert.match(manager, /<\/dev\/null >\/dev\/null 2>&1 &!/);
   assert.match(manager, /app_parent.*\$HOME\/Applications/);
   assert.match(manager, /RUNTIME_DIR.*CONFIG_DIR\/workspace/);
-  assert.match(manager, /version_label/);
+  assert.match(manager, /control_module_version_label/);
+  assert.match(manager, /version_relation/);
+  assert.match(versionHelper, /control_module_version_relation/);
+  assert.match(installer, /Setup blocks downgrades/);
   assert.match(manager, /\/usr\/bin\/base64/);
   assert.match(builder, /ControlModule\.icns/);
   assert.match(builder, /Launch\.applescript/);
+  assert.match(builder, /CFBundleShortVersionString/);
+  assert.match(builder, /CFBundleVersion/);
   assert.match(builder, /lipo.*-thin arm64/);
   assert.match(builder, /ditto "\$RUNTIME_DIR"/);
   assert.match(builder, /Contents\/Resources\/instance-id/);
@@ -547,6 +583,15 @@ test("ships relocatable native setup and uninstall apps", async () => {
   assert.match(setupSource, /@"CONTROL_MODULE_CONFIG_DIR"/);
   assert.match(setupSource, /removeObjectForKey:key/);
   assert.match(setupSource, /Update & apply/);
+  assert.match(setupSource, /Older version blocked/);
+  assert.match(setupSource, /api\.github\.com\/repos\/mitchell-mos\/Local-Terminal-Web-Based-Control-Module-\/releases\/latest/);
+  assert.match(setupSource, /contents\/version\.json\?ref=main/);
+  assert.match(setupSource, /application\/vnd\.github\.raw\+json/);
+  assert.match(setupSource, /ephemeralSessionConfiguration/);
+  assert.match(setupSource, /willPerformHTTPRedirection/);
+  assert.match(setupSource, /url\.host isEqualToString:@"api\.github\.com"/);
+  assert.match(setupSource, /data\.length > 131072/);
+  assert.match(setupSource, /github\.com/);
   assert.match(setupSource, /Apply settings/);
   assert.match(setupSource, /Cancel operation/);
   assert.match(setupSource, /Start/);

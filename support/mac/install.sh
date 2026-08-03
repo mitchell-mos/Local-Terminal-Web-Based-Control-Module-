@@ -5,6 +5,8 @@ umask 077
 
 SCRIPT_DIR="${0:A:h}"
 REPOSITORY_DIR="${SCRIPT_DIR:h:h}"
+[[ -r "$SCRIPT_DIR/version.sh" ]] || { print -u2 -- "The release-version helper is missing."; exit 1; }
+source "$SCRIPT_DIR/version.sh"
 SOURCE_DIR="$REPOSITORY_DIR"
 DESTINATION_APP="$HOME/Applications/Control Module.app"
 CREATE_DESKTOP_SHORTCUT=0
@@ -99,10 +101,19 @@ if [[ "$DESKTOP_ACCESS" != "private" && "$DESKTOP_ACCESS" != "desktop" ]]; then
   print -u2 -- "Desktop access must be either private or desktop."
   exit 1
 fi
-if [[ ! -f "$SOURCE_DIR/package.json" || ! -x "$SOURCE_DIR/ControlModule" || ! -f "$SOURCE_DIR/server/control_server.py" ]]; then
+if [[ ! -f "$SOURCE_DIR/package.json" || ! -x "$SOURCE_DIR/ControlModule" || ! -f "$SOURCE_DIR/server/control_server.py" ]] \
+  || [[ "$(/usr/bin/plutil -extract name raw "$SOURCE_DIR/package.json" 2>/dev/null || true)" != "control-module" ]]; then
   print -u2 -- "The source folder is not a verified Control Module checkout."
   exit 1
 fi
+
+case "$DESTINATION_APP" in
+  "$SOURCE_DIR/Control Module.app"|"$HOME/Applications/Control Module.app") ;;
+  *)
+    print -u2 -- "The Control Module app can be installed only in this source folder or your personal Applications folder."
+    exit 1
+    ;;
+esac
 
 if [[ "$WEB_PORT" != <-> ]] || (( WEB_PORT < 1025 || WEB_PORT > 65535 )); then
   print -u2 -- "Choose a dashboard port from 1025 to 65535."
@@ -225,12 +236,49 @@ if [[ -r "$CONFIG_DIR/runtime-path" ]]; then
 fi
 [[ -n "$CURRENT_RUNTIME_DIR" ]] || CURRENT_RUNTIME_DIR="$SOURCE_DIR"
 CURRENT_RUNTIME_DIR="${CURRENT_RUNTIME_DIR:A}"
+if [[ "$CURRENT_RUNTIME_DIR" != "$SOURCE_DIR" && "$CURRENT_RUNTIME_DIR" != "$CONFIG_DIR/workspace" ]]; then
+  CURRENT_RUNTIME_DIR=""
+fi
 
 CURRENT_INSTALL_APP=""
 if [[ -r "$CONFIG_DIR/install-path" ]]; then
   IFS= read -r CURRENT_INSTALL_APP < "$CONFIG_DIR/install-path" || true
 fi
 [[ -n "$CURRENT_INSTALL_APP" ]] && CURRENT_INSTALL_APP="${CURRENT_INSTALL_APP:A}"
+
+app_instance_id() {
+  local app_path="$1"
+  local app_id=""
+  [[ -r "$app_path/Contents/Resources/instance-id" ]] || return 1
+  IFS= read -r app_id < "$app_path/Contents/Resources/instance-id" || true
+  instance_id_is_valid "$app_id" || return 1
+  print -r -- "$app_id"
+}
+
+SOURCE_VERSION="$(control_module_version_label "$SOURCE_DIR" || true)"
+INSTALLED_VERSION=""
+HAS_VERIFIED_INSTALLATION=0
+VERSION_RELATION="unknown"
+if [[ -n "$CURRENT_INSTALL_APP" && -d "$CURRENT_INSTALL_APP" && ! -L "$CURRENT_INSTALL_APP" \
+  && "$(app_instance_id "$CURRENT_INSTALL_APP" || true)" == "$INSTANCE_ID" ]]; then
+  HAS_VERIFIED_INSTALLATION=1
+  INSTALLED_VERSION="$(control_module_version_label "$CURRENT_RUNTIME_DIR" 2>/dev/null || true)"
+fi
+if (( HAS_VERIFIED_INSTALLATION )); then
+  if [[ -z "$SOURCE_VERSION" || -z "$INSTALLED_VERSION" ]]; then
+    print -u2 -- "Setup could not verify the downloaded and installed release versions. The installed app was not replaced."
+    exit 1
+  fi
+  VERSION_RELATION="$(control_module_version_relation "$SOURCE_VERSION" "$INSTALLED_VERSION")"
+  if [[ "$VERSION_RELATION" == "unknown" ]]; then
+    print -u2 -- "Setup could not safely compare the downloaded and installed release versions. The installed app was not replaced."
+    exit 1
+  fi
+  if [[ "$VERSION_RELATION" == "older" ]]; then
+    print -u2 -- "This download is $SOURCE_VERSION, but this copy already has $INSTALLED_VERSION. Setup blocks downgrades so an older download cannot replace a newer installation. Download the latest release instead."
+    exit 1
+  fi
+fi
 
 if [[ "$DESKTOP_ACCESS" == "private" ]]; then
   DESIRED_RUNTIME_DIR="$CONFIG_DIR/workspace"
@@ -347,15 +395,6 @@ if [[ -n "$CURRENT_INSTALL_APP" && "$CURRENT_INSTALL_APP" != "$DESTINATION_APP" 
   && { listener_uses_instance "$CURRENT_WEB_PORT" || listener_uses_instance "$CURRENT_RUNNER_PORT"; }; then
   CONTROL_MODULE_CONFIG_ROOT="$CONFIG_ROOT" "$SCRIPT_DIR/uninstall.sh" --source "$SOURCE_DIR" --stop-only >/dev/null
 fi
-
-app_instance_id() {
-  local app_path="$1"
-  local app_id=""
-  [[ -r "$app_path/Contents/Resources/instance-id" ]] || return 1
-  IFS= read -r app_id < "$app_path/Contents/Resources/instance-id" || true
-  instance_id_is_valid "$app_id" || return 1
-  print -r -- "$app_id"
-}
 
 if [[ -e "$DESTINATION_APP" && "${DESTINATION_APP:h}" != "$SOURCE_DIR" ]]; then
   destination_id="$(app_instance_id "$DESTINATION_APP" || true)"
@@ -590,7 +629,7 @@ retire_previous_app() {
 retire_previous_app
 
 if (( LAUNCH_APP )); then
-  /usr/bin/open "$DESTINATION_APP"
+  CONTROL_MODULE_CONFIG_ROOT="$CONFIG_ROOT" "$SCRIPT_DIR/manage.sh" start --source "$SOURCE_DIR" >/dev/null
 fi
 
 print -- "Control Module was installed at $DESTINATION_APP"

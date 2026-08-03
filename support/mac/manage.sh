@@ -4,6 +4,8 @@ set -euo pipefail
 umask 077
 
 SCRIPT_DIR="${0:A:h}"
+[[ -r "$SCRIPT_DIR/version.sh" ]] || { print -u2 -- "The release-version helper is missing."; exit 1; }
+source "$SCRIPT_DIR/version.sh"
 CONFIG_ROOT="${CONTROL_MODULE_CONFIG_ROOT:-$HOME/Library/Application Support/Control Module}"
 SOURCE_DIR=""
 ACTION="status"
@@ -57,35 +59,13 @@ if [[ ! -f "$SOURCE_DIR/package.json" \
   || ! -x "$SOURCE_DIR/ControlModule" \
   || ! -f "$SOURCE_DIR/server/control_server.py" \
   || ! -x "$SCRIPT_DIR/uninstall.sh" ]] \
-  || ! /usr/bin/grep -Eq '"name"[[:space:]]*:[[:space:]]*"control-module"' "$SOURCE_DIR/package.json"; then
+  || [[ "$(/usr/bin/plutil -extract name raw "$SOURCE_DIR/package.json" 2>/dev/null || true)" != "control-module" ]]; then
   print -u2 -- "The source folder is not a verified Control Module checkout."
   exit 1
 fi
 
 instance_id_is_valid() {
   print -r -- "$1" | /usr/bin/grep -Eq '^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$'
-}
-
-version_label() {
-  local project_dir="$1"
-  local major="" update="" fix="" package_version=""
-  if [[ -r "$project_dir/version.json" ]]; then
-    major="$(/usr/bin/plutil -extract major raw "$project_dir/version.json" 2>/dev/null || true)"
-    update="$(/usr/bin/plutil -extract update raw "$project_dir/version.json" 2>/dev/null || true)"
-    fix="$(/usr/bin/plutil -extract fix raw "$project_dir/version.json" 2>/dev/null || true)"
-  fi
-  if [[ "$major" != <-> || "$update" != <-> || "$fix" != <-> ]]; then
-    package_version="$(/usr/bin/plutil -extract version raw "$project_dir/package.json" 2>/dev/null || true)"
-    if print -r -- "$package_version" | /usr/bin/grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
-      major="${package_version%%.*}"
-      package_version="${package_version#*.}"
-      update="${package_version%%.*}"
-      fix="${package_version##*.}"
-    else
-      return 1
-    fi
-  fi
-  /usr/bin/printf 'v%s.%02d.%s' "$major" "$update" "$fix"
 }
 
 emit_value() {
@@ -144,6 +124,9 @@ load_configuration() {
 
   INSTALL_APP="$(read_setting install-path || true)"
   RUNTIME_DIR="$(read_setting runtime-path || true)"
+  if [[ -z "$RUNTIME_DIR" && "$(read_setting desktop-access || print private)" == "desktop" ]]; then
+    RUNTIME_DIR="$SOURCE_DIR"
+  fi
   [[ -n "$INSTALL_APP" ]] && INSTALL_APP="${INSTALL_APP:A}"
   [[ -n "$RUNTIME_DIR" ]] && RUNTIME_DIR="${RUNTIME_DIR:A}"
   if [[ -n "$RUNTIME_DIR" && "$RUNTIME_DIR" != "$SOURCE_DIR" && "$RUNTIME_DIR" != "$CONFIG_DIR/workspace" ]]; then
@@ -165,6 +148,7 @@ configuration_is_owned() {
 installation_is_valid() {
   local app_parent app_name
   [[ -n "$INSTANCE_ID" && -n "$INSTALL_APP" && -d "$INSTALL_APP" && ! -L "$INSTALL_APP" ]] || return 1
+  [[ -x "$INSTALL_APP/Contents/Resources/ControlModule" ]] || return 1
   app_parent="${INSTALL_APP:h}"
   app_name="${INSTALL_APP:t}"
   [[ "$app_parent" == "$SOURCE_DIR" || "$app_parent" == "$HOME/Applications" ]] || return 1
@@ -175,13 +159,15 @@ installation_is_valid() {
 status_output() {
   local configured=0 installed=0 dashboard_running=0 runner_running=0 shortcut=0
   local desktop_access="private" shortcut_path="" source_version="Unknown" installed_version="Not installed"
+  local version_relation="unknown"
   configuration_is_owned && configured=1
   installation_is_valid && installed=1
   listener_uses_instance "$WEB_PORT" && dashboard_running=1
   listener_uses_instance "$RUNNER_PORT" && runner_running=1
-  source_version="$(version_label "$SOURCE_DIR" || print Unknown)"
+  source_version="$(control_module_version_label "$SOURCE_DIR" || print Unknown)"
   if (( installed )); then
-    installed_version="$(version_label "$RUNTIME_DIR" 2>/dev/null || version_label "$SOURCE_DIR" 2>/dev/null || print Unknown)"
+    installed_version="$(control_module_version_label "$RUNTIME_DIR" 2>/dev/null || print Unknown)"
+    version_relation="$(control_module_version_relation "$source_version" "$installed_version")"
   fi
   if (( configured )); then
     desktop_access="$(read_setting desktop-access || print private)"
@@ -197,6 +183,7 @@ status_output() {
   emit_value configured "$configured"
   emit_value installed "$installed"
   emit_value installed_version "$installed_version"
+  emit_value version_relation "$version_relation"
   emit_value install_path "$INSTALL_APP"
   emit_value runtime_path "$RUNTIME_DIR"
   emit_value web_port "$WEB_PORT"
@@ -234,7 +221,10 @@ start_instance() {
   if listener_uses_instance "$WEB_PORT" || listener_uses_instance "$RUNNER_PORT"; then
     stop_instance
   fi
-  /usr/bin/open "$INSTALL_APP"
+  if /usr/bin/open -n "$INSTALL_APP" && wait_until_running; then
+    return 0
+  fi
+  /usr/bin/nohup /bin/zsh "$INSTALL_APP/Contents/Resources/ControlModule" </dev/null >/dev/null 2>&1 &!
   wait_until_running || {
     print -u2 -- "Control Module did not finish starting. Check its private dashboard and runner logs."
     return 1

@@ -1,4 +1,5 @@
 #import <AppKit/AppKit.h>
+#import <math.h>
 
 typedef NS_ENUM(NSInteger, CMOperation) {
     CMOperationNone,
@@ -38,6 +39,51 @@ static NSStackView *CMVerticalStack(NSArray<NSView *> *views, CGFloat spacing) {
     return stack;
 }
 
+static NSComparisonResult CMCompareReleaseVersions(NSString *candidate, NSString *current, BOOL *valid) {
+    static NSRegularExpression *pattern;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        pattern = [NSRegularExpression regularExpressionWithPattern:@"^v([0-9]{1,9})\\.([0-9]{2})\\.([0-9]{1,9})$"
+                                                            options:0
+                                                              error:nil];
+    });
+    if (valid) *valid = NO;
+    if (!candidate || !current) return NSOrderedSame;
+    NSTextCheckingResult *candidateMatch = [pattern firstMatchInString:candidate options:0 range:NSMakeRange(0, candidate.length)];
+    NSTextCheckingResult *currentMatch = [pattern firstMatchInString:current options:0 range:NSMakeRange(0, current.length)];
+    if (!candidateMatch || !currentMatch || candidateMatch.numberOfRanges != 4 || currentMatch.numberOfRanges != 4) {
+        return NSOrderedSame;
+    }
+    for (NSUInteger index = 1; index < 4; index += 1) {
+        NSDecimalNumber *candidatePart = [NSDecimalNumber decimalNumberWithString:[candidate substringWithRange:[candidateMatch rangeAtIndex:index]]];
+        NSDecimalNumber *currentPart = [NSDecimalNumber decimalNumberWithString:[current substringWithRange:[currentMatch rangeAtIndex:index]]];
+        NSComparisonResult result = [candidatePart compare:currentPart];
+        if (result != NSOrderedSame) {
+            if (valid) *valid = YES;
+            return result;
+        }
+    }
+    if (valid) *valid = YES;
+    return NSOrderedSame;
+}
+
+static BOOL CMReadVersionComponent(id value, NSInteger minimum, NSInteger maximum, NSInteger *result) {
+    if (![value isKindOfClass:NSNumber.class]
+        || CFGetTypeID((__bridge CFTypeRef)value) == CFBooleanGetTypeID()) {
+        return NO;
+    }
+    double numericValue = [value doubleValue];
+    NSInteger integerValue = [value integerValue];
+    if (!isfinite(numericValue)
+        || numericValue != (double)integerValue
+        || integerValue < minimum
+        || integerValue > maximum) {
+        return NO;
+    }
+    if (result) *result = integerValue;
+    return YES;
+}
+
 @interface CMFlippedView : NSView
 @end
 
@@ -47,7 +93,7 @@ static NSStackView *CMVerticalStack(NSArray<NSView *> *views, CGFloat spacing) {
 }
 @end
 
-@interface CMSetupController : NSObject <NSApplicationDelegate, NSWindowDelegate>
+@interface CMSetupController : NSObject <NSApplicationDelegate, NSWindowDelegate, NSURLSessionTaskDelegate>
 @property(nonatomic, strong) NSWindow *window;
 @property(nonatomic, strong) NSAlert *lifecycleAlert;
 @property(nonatomic, copy) NSString *sourceFolder;
@@ -65,6 +111,7 @@ static NSStackView *CMVerticalStack(NSArray<NSView *> *views, CGFloat spacing) {
 @property(nonatomic, strong) NSTextField *installedVersionLabel;
 @property(nonatomic, strong) NSTextField *installPathLabel;
 @property(nonatomic, strong) NSTextField *updateLabel;
+@property(nonatomic, strong) NSTextField *releaseCheckLabel;
 @property(nonatomic, strong) NSTextField *errorLabel;
 @property(nonatomic, strong) NSTextField *successLabel;
 
@@ -83,8 +130,14 @@ static NSStackView *CMVerticalStack(NSArray<NSView *> *views, CGFloat spacing) {
 @property(nonatomic, strong) NSButton *stopButton;
 @property(nonatomic, strong) NSButton *restartButton;
 @property(nonatomic, strong) NSButton *refreshButton;
+@property(nonatomic, strong) NSButton *checkUpdatesButton;
+@property(nonatomic, strong) NSButton *openReleaseButton;
 @property(nonatomic, strong) NSButton *cancelButton;
 @property(nonatomic, strong) NSButton *applyButton;
+@property(nonatomic, strong) NSURLSessionDataTask *releaseTask;
+@property(nonatomic, strong) NSURL *latestReleaseURL;
+- (NSButton *)actionButton:(NSString *)title symbol:(NSString *)symbol action:(SEL)action;
+- (void)startMainBranchUpdateCheck;
 @end
 
 @implementation CMSetupController
@@ -298,6 +351,14 @@ static NSStackView *CMVerticalStack(NSArray<NSView *> *views, CGFloat spacing) {
 
     self.updateLabel = CMLabel(@"", [NSFont systemFontOfSize:13 weight:NSFontWeightMedium], NSColor.controlAccentColor);
     self.updateLabel.hidden = YES;
+    self.releaseCheckLabel = CMLabel(@"", [NSFont systemFontOfSize:12], NSColor.secondaryLabelColor);
+    self.releaseCheckLabel.hidden = YES;
+    self.checkUpdatesButton = [self actionButton:@"Check GitHub for updates" symbol:@"arrow.down.circle" action:@selector(checkUpdatesPressed:)];
+    self.checkUpdatesButton.bezelStyle = NSBezelStyleInline;
+    self.openReleaseButton = [self actionButton:@"View releases" symbol:@"arrow.up.right.square" action:@selector(openReleasePressed:)];
+    self.openReleaseButton.bezelStyle = NSBezelStyleInline;
+    self.openReleaseButton.hidden = YES;
+    NSStackView *releaseButtons = CMHorizontalStack(@[self.checkUpdatesButton, self.openReleaseButton, [NSView new]], 10);
     NSTextField *scope = CMLabel(
         @"Setup changes only this verified copy. Saved projects, logs, and settings remain in this installation’s private Application Support folder.",
         [NSFont systemFontOfSize:12],
@@ -311,6 +372,8 @@ static NSStackView *CMVerticalStack(NSArray<NSView *> *views, CGFloat spacing) {
         separator,
         details,
         self.updateLabel,
+        releaseButtons,
+        self.releaseCheckLabel,
         scope,
     ], 11);
     return [self sectionWithTitle:@"Overview" content:content];
@@ -460,13 +523,13 @@ static NSStackView *CMVerticalStack(NSArray<NSView *> *views, CGFloat spacing) {
     BOOL partial = dashboardRunning != runnerRunning;
     NSString *sourceVersion = self.status[@"source_version"] ?: @"Unknown";
     NSString *installedVersion = self.status[@"installed_version"] ?: @"Not installed";
+    NSString *versionRelation = self.status[@"version_relation"] ?: @"unknown";
     NSString *installPath = self.status[@"install_path"] ?: @"—";
     NSInteger webPort = [self statusInteger:@"web_port" fallback:1025];
     NSInteger runnerPort = [self statusInteger:@"runner_port" fallback:10001];
-    BOOL updateAvailable = installed
-        && ![sourceVersion isEqualToString:@"Unknown"]
-        && ![installedVersion isEqualToString:@"Unknown"]
-        && ![sourceVersion isEqualToString:installedVersion];
+    BOOL updateAvailable = installed && [versionRelation isEqualToString:@"newer"];
+    BOOL downgradeBlocked = installed && [versionRelation isEqualToString:@"older"];
+    BOOL versionUnknown = installed && [versionRelation isEqualToString:@"unknown"];
 
     self.sourceVersionLabel.stringValue = sourceVersion;
     self.installedVersionLabel.stringValue = installedVersion;
@@ -475,11 +538,25 @@ static NSStackView *CMVerticalStack(NSArray<NSView *> *views, CGFloat spacing) {
     self.overviewTitle.stringValue = installed ? @"Existing installation found" : @"Ready for first setup";
     self.runningApplyNote.hidden = !running;
 
-    if (updateAvailable) {
+    if (downgradeBlocked) {
+        self.updateLabel.stringValue = [NSString stringWithFormat:
+            @"Older download blocked: %@ cannot replace installed %@. Download the latest release instead.",
+            sourceVersion,
+            installedVersion];
+        self.updateLabel.textColor = NSColor.systemRedColor;
+        self.updateLabel.hidden = NO;
+        self.operationLabel.stringValue = @"This downloaded copy is older than the installed app.";
+    } else if (versionUnknown) {
+        self.updateLabel.stringValue = @"Setup could not safely compare this download with the installed version. Applying it is blocked.";
+        self.updateLabel.textColor = NSColor.systemRedColor;
+        self.updateLabel.hidden = NO;
+        self.operationLabel.stringValue = @"Version verification needs attention.";
+    } else if (updateAvailable) {
         self.updateLabel.stringValue = [NSString stringWithFormat:
             @"Update available: %@ will replace %@. Saved projects and settings stay in place.",
             sourceVersion,
             installedVersion];
+        self.updateLabel.textColor = NSColor.controlAccentColor;
         self.updateLabel.hidden = NO;
         self.operationLabel.stringValue = @"An update is ready to apply.";
     } else {
@@ -539,15 +616,22 @@ static NSStackView *CMVerticalStack(NSArray<NSView *> *views, CGFloat spacing) {
     self.stopButton.enabled = fieldsEnabled && installed && anyRunning;
     self.restartButton.enabled = fieldsEnabled && installed;
     self.refreshButton.enabled = fieldsEnabled;
-    self.applyButton.enabled = fieldsEnabled && [self validatePort];
+    self.checkUpdatesButton.enabled = fieldsEnabled && self.releaseTask == nil;
+    NSString *versionRelation = self.status[@"version_relation"] ?: @"unknown";
+    BOOL versionBlocked = installed
+        && ([versionRelation isEqualToString:@"older"] || [versionRelation isEqualToString:@"unknown"]);
+    self.applyButton.enabled = fieldsEnabled && !versionBlocked && [self validatePort];
     self.cancelButton.title = busy ? @"Cancel operation" : @"Cancel";
 
-    NSString *sourceVersion = self.status[@"source_version"] ?: @"Unknown";
-    NSString *installedVersion = self.status[@"installed_version"] ?: @"Not installed";
-    BOOL updateAvailable = installed
-        && ![sourceVersion isEqualToString:installedVersion]
-        && ![sourceVersion isEqualToString:@"Unknown"];
-    self.applyButton.title = !installed ? @"Install" : (updateAvailable ? @"Update & apply" : @"Apply settings");
+    BOOL updateAvailable = installed && [versionRelation isEqualToString:@"newer"];
+    BOOL downgradeBlocked = installed && [versionRelation isEqualToString:@"older"];
+    self.applyButton.title = !installed
+        ? @"Install"
+        : (downgradeBlocked
+            ? @"Older version blocked"
+            : ([versionRelation isEqualToString:@"unknown"]
+                ? @"Version check required"
+                : (updateAvailable ? @"Update & apply" : @"Apply settings")));
 }
 
 - (BOOL)validatePort {
@@ -711,9 +795,232 @@ static NSStackView *CMVerticalStack(NSArray<NSView *> *views, CGFloat spacing) {
     self.errorLabel.hidden = YES;
 }
 
+- (void)URLSession:(NSURLSession *)session
+              task:(NSURLSessionTask *)task
+willPerformHTTPRedirection:(NSHTTPURLResponse *)response
+        newRequest:(NSURLRequest *)request
+ completionHandler:(void (^)(NSURLRequest * _Nullable))completionHandler {
+    (void)session;
+    (void)task;
+    (void)response;
+    NSURL *url = request.URL;
+    completionHandler([url.scheme isEqualToString:@"https"] && [url.host isEqualToString:@"api.github.com"]
+        ? request
+        : nil);
+}
+
+- (void)finishReleaseCheckWithMessage:(NSString *)message color:(NSColor *)color releaseAvailable:(BOOL)releaseAvailable {
+    self.releaseTask = nil;
+    self.releaseCheckLabel.stringValue = message ?: @"The update check could not finish.";
+    self.releaseCheckLabel.textColor = color ?: NSColor.secondaryLabelColor;
+    self.releaseCheckLabel.hidden = NO;
+    self.openReleaseButton.hidden = !releaseAvailable;
+    self.checkUpdatesButton.title = @"Check again";
+    [self updateControls];
+}
+
+- (void)checkUpdatesPressed:(id)sender {
+    (void)sender;
+    if (self.releaseTask || self.sourceFolder.length == 0) return;
+
+    NSURL *endpoint = [NSURL URLWithString:@"https://api.github.com/repos/mitchell-mos/Local-Terminal-Web-Based-Control-Module-/releases/latest"];
+    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:endpoint
+                                                           cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
+                                                       timeoutInterval:12.0];
+    [request setValue:@"application/vnd.github+json" forHTTPHeaderField:@"Accept"];
+    [request setValue:@"2022-11-28" forHTTPHeaderField:@"X-GitHub-Api-Version"];
+    [request setValue:@"Control-Module-Setup" forHTTPHeaderField:@"User-Agent"];
+
+    NSURLSessionConfiguration *configuration = NSURLSessionConfiguration.ephemeralSessionConfiguration;
+    configuration.URLCache = nil;
+    configuration.HTTPCookieStorage = nil;
+    NSURLSession *session = [NSURLSession sessionWithConfiguration:configuration delegate:self delegateQueue:nil];
+    self.releaseCheckLabel.stringValue = @"Checking the latest published GitHub release…";
+    self.releaseCheckLabel.textColor = NSColor.secondaryLabelColor;
+    self.releaseCheckLabel.hidden = NO;
+    self.openReleaseButton.hidden = YES;
+    self.latestReleaseURL = nil;
+    self.checkUpdatesButton.title = @"Checking…";
+
+    __weak typeof(self) weakSelf = self;
+    self.releaseTask = [session dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        [session finishTasksAndInvalidate];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            typeof(self) self = weakSelf;
+            if (!self) return;
+            if (error) {
+                [self finishReleaseCheckWithMessage:@"GitHub could not be reached. This copy was not changed. Try again when connected to the internet."
+                                               color:NSColor.systemRedColor
+                                    releaseAvailable:NO];
+                return;
+            }
+            NSHTTPURLResponse *http = [response isKindOfClass:NSHTTPURLResponse.class] ? (NSHTTPURLResponse *)response : nil;
+            if (http.statusCode == 404) {
+                self.releaseTask = nil;
+                [self startMainBranchUpdateCheck];
+                return;
+            }
+            if (!http || http.statusCode != 200) {
+                [self finishReleaseCheckWithMessage:@"GitHub did not return an update result. This copy was not changed; try again later."
+                                               color:NSColor.systemRedColor
+                                    releaseAvailable:NO];
+                return;
+            }
+            if (data.length == 0 || data.length > 131072) {
+                [self finishReleaseCheckWithMessage:@"GitHub returned an invalid update response. This copy was not changed."
+                                               color:NSColor.systemRedColor
+                                    releaseAvailable:NO];
+                return;
+            }
+            NSError *jsonError = nil;
+            id object = [NSJSONSerialization JSONObjectWithData:data options:0 error:&jsonError];
+            NSDictionary *release = [object isKindOfClass:NSDictionary.class] ? (NSDictionary *)object : nil;
+            NSString *latestVersion = [release[@"tag_name"] isKindOfClass:NSString.class] ? release[@"tag_name"] : nil;
+            NSString *sourceVersion = self.status[@"source_version"] ?: @"Unknown";
+            NSString *installedVersion = self.status[@"installed_version"] ?: @"Not installed";
+            NSString *currentVersion = [self statusBool:@"installed"] ? installedVersion : sourceVersion;
+            BOOL comparisonValid = NO;
+            NSComparisonResult comparison = CMCompareReleaseVersions(latestVersion, currentVersion, &comparisonValid);
+            if (jsonError || !comparisonValid) {
+                [self finishReleaseCheckWithMessage:@"GitHub returned a release without a valid Control Module version. This copy was not changed."
+                                               color:NSColor.systemRedColor
+                                    releaseAvailable:NO];
+                return;
+            }
+
+            self.latestReleaseURL = [NSURL URLWithString:@"https://github.com/mitchell-mos/Local-Terminal-Web-Based-Control-Module-/releases/latest"];
+            self.openReleaseButton.title = @"View releases";
+            self.openReleaseButton.accessibilityLabel = @"View releases";
+            NSString *message;
+            NSColor *color = NSColor.secondaryLabelColor;
+            if (comparison == NSOrderedDescending) {
+                BOOL sourceComparisonValid = NO;
+                NSComparisonResult sourceComparison = CMCompareReleaseVersions(sourceVersion, currentVersion, &sourceComparisonValid);
+                if (sourceComparisonValid && sourceComparison == NSOrderedDescending && [latestVersion isEqualToString:sourceVersion]) {
+                    message = [NSString stringWithFormat:@"This download already contains %@. Choose Update & apply below.", latestVersion];
+                    color = NSColor.systemGreenColor;
+                } else {
+                    message = [NSString stringWithFormat:@"%@ is available. Open the release page, download it, then run its Setup.", latestVersion];
+                    color = NSColor.controlAccentColor;
+                }
+            } else if (comparison == NSOrderedSame) {
+                message = [NSString stringWithFormat:@"%@ is the latest published release.", currentVersion];
+                color = NSColor.systemGreenColor;
+            } else {
+                message = [NSString stringWithFormat:@"This copy (%@) is newer than GitHub’s latest published release (%@).", currentVersion, latestVersion];
+            }
+            [self finishReleaseCheckWithMessage:message color:color releaseAvailable:YES];
+        });
+    }];
+    [self.releaseTask resume];
+    [self updateControls];
+}
+
+- (void)startMainBranchUpdateCheck {
+    NSURL *endpoint = [NSURL URLWithString:@"https://api.github.com/repos/mitchell-mos/Local-Terminal-Web-Based-Control-Module-/contents/version.json?ref=main"];
+    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:endpoint
+                                                           cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
+                                                       timeoutInterval:12.0];
+    [request setValue:@"application/vnd.github.raw+json" forHTTPHeaderField:@"Accept"];
+    [request setValue:@"2022-11-28" forHTTPHeaderField:@"X-GitHub-Api-Version"];
+    [request setValue:@"Control-Module-Setup" forHTTPHeaderField:@"User-Agent"];
+
+    NSURLSessionConfiguration *configuration = NSURLSessionConfiguration.ephemeralSessionConfiguration;
+    configuration.URLCache = nil;
+    configuration.HTTPCookieStorage = nil;
+    NSURLSession *session = [NSURLSession sessionWithConfiguration:configuration delegate:self delegateQueue:nil];
+    self.releaseCheckLabel.stringValue = @"No packaged release was found. Checking the version on GitHub main…";
+
+    __weak typeof(self) weakSelf = self;
+    self.releaseTask = [session dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        [session finishTasksAndInvalidate];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            typeof(self) self = weakSelf;
+            if (!self) return;
+            NSHTTPURLResponse *http = [response isKindOfClass:NSHTTPURLResponse.class] ? (NSHTTPURLResponse *)response : nil;
+            if (error || !http || http.statusCode != 200 || data.length == 0 || data.length > 4096) {
+                [self finishReleaseCheckWithMessage:@"No packaged release was found, and GitHub main could not be checked. This copy was not changed."
+                                               color:NSColor.systemRedColor
+                                    releaseAvailable:NO];
+                return;
+            }
+            NSError *jsonError = nil;
+            id object = [NSJSONSerialization JSONObjectWithData:data options:0 error:&jsonError];
+            NSDictionary *version = [object isKindOfClass:NSDictionary.class] ? (NSDictionary *)object : nil;
+            NSInteger major = 0;
+            NSInteger update = 0;
+            NSInteger fix = 0;
+            if (jsonError || !version
+                || !CMReadVersionComponent(version[@"major"], 1, 999999999, &major)
+                || !CMReadVersionComponent(version[@"update"], 0, 99, &update)
+                || !CMReadVersionComponent(version[@"fix"], 0, 999999999, &fix)) {
+                [self finishReleaseCheckWithMessage:@"GitHub main returned invalid version metadata. This copy was not changed."
+                                               color:NSColor.systemRedColor
+                                    releaseAvailable:NO];
+                return;
+            }
+            NSString *latestVersion = [NSString stringWithFormat:@"v%ld.%02ld.%ld",
+                (long)major,
+                (long)update,
+                (long)fix];
+            NSString *sourceVersion = self.status[@"source_version"] ?: @"Unknown";
+            NSString *installedVersion = self.status[@"installed_version"] ?: @"Not installed";
+            NSString *currentVersion = [self statusBool:@"installed"] ? installedVersion : sourceVersion;
+            BOOL comparisonValid = NO;
+            NSComparisonResult comparison = CMCompareReleaseVersions(latestVersion, currentVersion, &comparisonValid);
+            if (!comparisonValid) {
+                [self finishReleaseCheckWithMessage:@"The GitHub main version could not be compared safely. This copy was not changed."
+                                               color:NSColor.systemRedColor
+                                    releaseAvailable:NO];
+                return;
+            }
+
+            self.latestReleaseURL = [NSURL URLWithString:@"https://github.com/mitchell-mos/Local-Terminal-Web-Based-Control-Module-"];
+            self.openReleaseButton.title = @"View repository";
+            self.openReleaseButton.accessibilityLabel = @"View repository";
+            NSString *message;
+            NSColor *color = NSColor.secondaryLabelColor;
+            if (comparison == NSOrderedDescending) {
+                message = [NSString stringWithFormat:
+                    @"%@ is on GitHub main, but no packaged release is published yet. A source clone can be updated with Git; packaged installs should wait for a release.",
+                    latestVersion];
+                color = NSColor.controlAccentColor;
+            } else if (comparison == NSOrderedSame) {
+                message = [NSString stringWithFormat:@"This copy matches GitHub main (%@). No packaged release is published yet.", currentVersion];
+                color = NSColor.systemGreenColor;
+            } else {
+                message = [NSString stringWithFormat:@"This copy (%@) is newer than GitHub main (%@). No packaged release is published yet.", currentVersion, latestVersion];
+            }
+            [self finishReleaseCheckWithMessage:message color:color releaseAvailable:YES];
+        });
+    }];
+    [self.releaseTask resume];
+    [self updateControls];
+}
+
+- (void)openReleasePressed:(id)sender {
+    (void)sender;
+    NSURL *url = self.latestReleaseURL;
+    if (![url.scheme isEqualToString:@"https"] || ![url.host isEqualToString:@"github.com"]) {
+        [self finishReleaseCheckWithMessage:@"The verified GitHub release link is unavailable. Check again."
+                                       color:NSColor.systemRedColor
+                            releaseAvailable:NO];
+        return;
+    }
+    [NSWorkspace.sharedWorkspace openURL:url];
+}
+
 - (void)applyPressed:(id)sender {
     (void)sender;
     if (![self validatePort] || self.activeTask || self.sourceFolder.length == 0) return;
+    NSString *versionRelation = self.status[@"version_relation"] ?: @"unknown";
+    if ([self statusBool:@"installed"]
+        && ([versionRelation isEqualToString:@"older"] || [versionRelation isEqualToString:@"unknown"])) {
+        [self showError:[versionRelation isEqualToString:@"older"]
+            ? @"This download is older than the installed version. Download the latest GitHub release instead."
+            : @"Setup could not verify the version order, so it did not replace the installed app."];
+        return;
+    }
     NSInteger port = self.portField.stringValue.integerValue;
     NSString *destination = self.locationPopup.indexOfSelectedItem == 1
         ? [NSHomeDirectory() stringByAppendingPathComponent:@"Applications/Control Module.app"]

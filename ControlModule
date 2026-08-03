@@ -52,6 +52,14 @@ fi
 if [[ -r "$RUNNER_PORT_FILE" ]]; then
   IFS= read -r RUNNER_PORT < "$RUNNER_PORT_FILE" || true
 fi
+[[ -n "$CONFIGURED_PROJECT_DIR" ]] && CONFIGURED_PROJECT_DIR="${CONFIGURED_PROJECT_DIR:A}"
+if [[ -n "$CONFIGURED_RUNTIME_DIR" ]]; then
+  CONFIGURED_RUNTIME_DIR="${CONFIGURED_RUNTIME_DIR:A}"
+  if [[ "$CONFIGURED_RUNTIME_DIR" != "$CONFIGURED_PROJECT_DIR" \
+    && "$CONFIGURED_RUNTIME_DIR" != "${USER_CONFIG_DIR:A}/workspace" ]]; then
+    CONFIGURED_RUNTIME_DIR=""
+  fi
+fi
 
 if [[ -n "${CONTROL_MODULE_DIR:-}" ]]; then
   PROJECT_DIR="${CONTROL_MODULE_DIR:A}"
@@ -303,12 +311,15 @@ acquire_launch_lock() {
   return 1
 }
 
-wait_for_running_instance() {
+wait_for_running_instance_or_launch_turn() {
   local attempt
   for attempt in {1..120}; do
     if dashboard_ready && runner_ready; then
       open_control_module
       return 0
+    fi
+    if acquire_launch_lock; then
+      return 2
     fi
     /bin/sleep 0.25
   done
@@ -357,9 +368,20 @@ prepare_private_data() {
   (( migration_failed == 0 ))
 }
 
-if [[ ! -d "$PROJECT_DIR" || ! -f "$PROJECT_DIR/package.json" ]]; then
+if [[ ! -d "$PROJECT_DIR" || ! -f "$PROJECT_DIR/package.json" ]] \
+  || [[ "$(/usr/bin/plutil -extract name raw "$PROJECT_DIR/package.json" 2>/dev/null || true)" != "control-module" ]]; then
   show_error "The Control Module project folder could not be found. Run Setup again, or set CONTROL_MODULE_DIR to the source folder."
   exit 1
+fi
+
+if [[ -n "$INSTANCE_ID" && -n "$CONFIGURED_PROJECT_DIR" ]]; then
+  configured_source_id=""
+  [[ -r "$CONFIGURED_PROJECT_DIR/.control-module-instance" ]] \
+    && IFS= read -r configured_source_id < "$CONFIGURED_PROJECT_DIR/.control-module-instance" || true
+  if [[ "$configured_source_id" != "$INSTANCE_ID" ]]; then
+    show_error "This app's verified source folder no longer matches its installation marker. Run Setup again from the matching Control Module folder."
+    exit 1
+  fi
 fi
 
 if [[ -n "$INSTANCE_ID" && -r "$PROJECT_PATH_FILE" ]]; then
@@ -399,11 +421,15 @@ if dashboard_ready && runner_ready; then
 fi
 
 if ! acquire_launch_lock; then
-  if wait_for_running_instance; then
+  wait_for_running_instance_or_launch_turn
+  wait_result=$?
+  if (( wait_result == 0 )); then
     exit 0
   fi
-  show_error "Control Module is already starting, but its local services are not ready yet. Wait a moment, then reopen the app."
-  exit 1
+  if (( wait_result != 2 )); then
+    show_error "Control Module is already starting, but its local services are not ready yet. Wait a moment, then reopen the app."
+    exit 1
+  fi
 fi
 
 # Another launcher may have finished between the first readiness check and lock.

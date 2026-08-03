@@ -52,4 +52,19 @@ test("fuzzes every valid release transition", () => {
     ),
     { numRuns: 1_000 },
   );
+
+  fc.assert(
+    fc.property(
+      releaseVersion.filter((version) => version.update < 99),
+      fc.integer({ min: 1, max: 99 }),
+      (version, increment) => {
+        const nextUpdate = Math.min(99, version.update + increment);
+        assert.equal(
+          classifyTransition(version, { major: version.major, update: nextUpdate, fix: 0 }),
+          "update",
+        );
+      },
+    ),
+    { numRuns: 1_000 },
+  );
 });

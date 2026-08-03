@@ -18,7 +18,7 @@ if [[ ! -f "$SOURCE_NATIVE" || ! -f "$SOURCE_PLIST" || ! -f "$SOURCE_ICON" ]]; t
   print -u2 -- "The native Setup source, property list, or gear icon is missing."
   exit 1
 fi
-if [[ ! -x "$SCRIPT_DIR/manage.sh" || ! -x "$SCRIPT_DIR/install.sh" ]]; then
+if [[ ! -x "$SCRIPT_DIR/manage.sh" || ! -x "$SCRIPT_DIR/install.sh" || ! -r "$SCRIPT_DIR/version.sh" ]]; then
   print -u2 -- "The Setup lifecycle or installation backend is missing."
   exit 1
 fi

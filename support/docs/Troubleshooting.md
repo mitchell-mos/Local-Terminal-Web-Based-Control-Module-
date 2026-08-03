@@ -16,6 +16,12 @@ Run `Setup.app` again and select a free dashboard port. Setup will not kill an u
 
 Setup compares the downloaded source with that copy's private working directory. Choose **Update & apply** to replace the installed app and working copy while keeping its saved projects, logs, and settings. A browser refresh alone cannot update an older local server process.
 
+## Setup blocks an older download
+
+The downloaded folder is older than the installed app. Setup intentionally will not downgrade it. Press **Check GitHub for updates**, open the release page, download the latest ARM64 archive, and run the Setup inside that newer folder. The check is manual and does not install anything automatically.
+
+This guard is available in Setup v1.04.0 and later. Delete Setup archives from earlier versions after upgrading because an older executable cannot inherit newer rollback protections.
+
 ## Control Module is only partially running
 
 Open `Setup.app` and choose **Restart** under Services. Setup safely stops processes owned by this installation before reopening its verified app. It does not stop an unrelated listener that happens to use another port.

@@ -6,6 +6,10 @@ Notable user-facing changes are recorded here. Versions use `vMAJOR.UPDATE.FIX`.
 
 - No unreleased changes.
 
+## v1.04.2
+
+- Strengthened CodeQL-safe source tests to compare complete URL-construction and host-validation lines instead of URL substrings.
+
 ## v1.04.1
 
 - Replaced URL-shaped regular-expression assertions with literal containment checks so CodeQL does not treat test-source checks as permissive URL validation.

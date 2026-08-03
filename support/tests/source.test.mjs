@@ -25,6 +25,7 @@ test("does not ship private user data or unrelated runtime state", async () => {
     read("server/browser_tabs.jxa"),
   ]);
   const publicSource = `${runner}\n${launcher}\n${page}\n${packageJson}\n${proxy}\n${browserTabs}`;
+  const browserTabLines = new Set(browserTabs.split("\n").map((line) => line.trim()));
 
   assert.doesNotMatch(publicSource, /\/Users\/[A-Za-z0-9._-]+/);
   assert.match(launcher, /local url="\$\{WEB_URL\}"/);
@@ -98,8 +99,8 @@ test("does not ship private user data or unrelated runtime state", async () => {
   assert.doesNotMatch(restartIcon, /transform=|stroke-width=/);
   assert.match(runner, /\/api\/projects\/browser-tabs/);
   assert.match(runner, /project_browser_tabs/);
-  assert.ok(browserTabs.includes("http://127.0.0.1:"));
-  assert.ok(browserTabs.includes("http://localhost:"));
+  assert.ok(browserTabLines.has('"http://127.0.0.1:" + port,'));
+  assert.ok(browserTabLines.has('"http://localhost:" + port,'));
   assert.match(browserTabs, /tab\.url\(\)/);
   assert.match(browserTabs, /freshProjectUrl\(tabUrl\)/);
   assert.match(browserTabs, /browserWindow\.currentTab = tab/);
@@ -449,6 +450,7 @@ test("ships relocatable native setup and uninstall apps", async () => {
     read(".github/workflows/ci.yml"),
     read("support/mac/release.sh"),
   ]);
+  const setupLines = new Set(setupSource.split("\n").map((line) => line.trim()));
 
   assert.match(launcher, /Library\/Application Support\/Control Module/);
   assert.match(launcher, /server\/control_server\.py/);
@@ -584,14 +586,14 @@ test("ships relocatable native setup and uninstall apps", async () => {
   assert.match(setupSource, /removeObjectForKey:key/);
   assert.match(setupSource, /Update & apply/);
   assert.match(setupSource, /Older version blocked/);
-  assert.ok(setupSource.includes("https://api.github.com/repos/mitchell-mos/Local-Terminal-Web-Based-Control-Module-/releases/latest"));
-  assert.ok(setupSource.includes("contents/version.json?ref=main"));
+  assert.ok(setupLines.has('NSURL *endpoint = [NSURL URLWithString:@"https://api.github.com/repos/mitchell-mos/Local-Terminal-Web-Based-Control-Module-/releases/latest"];'));
+  assert.ok(setupLines.has('NSURL *endpoint = [NSURL URLWithString:@"https://api.github.com/repos/mitchell-mos/Local-Terminal-Web-Based-Control-Module-/contents/version.json?ref=main"];'));
   assert.ok(setupSource.includes("application/vnd.github.raw+json"));
   assert.match(setupSource, /ephemeralSessionConfiguration/);
   assert.match(setupSource, /willPerformHTTPRedirection/);
-  assert.ok(setupSource.includes('url.host isEqualToString:@"api.github.com"'));
+  assert.ok(setupLines.has('completionHandler([url.scheme isEqualToString:@"https"] && [url.host isEqualToString:@"api.github.com"]'));
   assert.match(setupSource, /data\.length > 131072/);
-  assert.ok(setupSource.includes("github.com"));
+  assert.ok(setupLines.has('if (![url.scheme isEqualToString:@"https"] || ![url.host isEqualToString:@"github.com"]) {'));
   assert.match(setupSource, /Apply settings/);
   assert.match(setupSource, /Cancel operation/);
   assert.match(setupSource, /Start/);
